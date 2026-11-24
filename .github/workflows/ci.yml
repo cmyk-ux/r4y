@@ -14,9 +14,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The hosted Windows Server runner does not provide an RDNA2/Wave32 adapter.
-  # Keep these tests enabled for developer runs on supported hardware.
-  R4Y_SKIP_HARDWARE_GPU_TESTS: '1'
 
 jobs:
   check:
@@ -42,6 +39,7 @@ jobs:
       # Build the one user-facing R4Y executable.
       - name: Build R4Y
         run: cargo build --release --locked -p r4y
-      # Includes xtask's repository_passes_policy, the asset-policy check.
+      # The hosted runner has no guaranteed RDNA2/Wave32 GPU. These two
+      # hardware-reference tests remain enabled for local supported hardware.
       - name: Tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --skip gathers_at_a_level_match_the_hardware --skip permutes_read_the_lane_named_and_zero_from_lanes_left_out

@@ -146,10 +146,6 @@ fn first(u: f32, size: u32) -> i64 {
 
 #[test]
 fn gathers_at_a_level_match_the_hardware() {
-    if std::env::var_os("R4Y_SKIP_HARDWARE_GPU_TESTS").is_some() {
-        eprintln!("GPU hardware-dependent shader test skipped by R4Y_SKIP_HARDWARE_GPU_TESTS");
-        return;
-    }
     // 24×16 then 12×8, 6×4, 3×2; red = level × 1000 + y × 32 + x + 1.
     let mut texels = Vec::new();
     for l in 0..4 {
@@ -287,10 +283,6 @@ fn gathers_at_a_level_that_may_be_a_fraction_stop() {
 
 #[test]
 fn permutes_read_the_lane_named_and_zero_from_lanes_left_out() {
-    if std::env::var_os("R4Y_SKIP_HARDWARE_GPU_TESTS").is_some() {
-        eprintln!("GPU hardware-dependent shader test skipped by R4Y_SKIP_HARDWARE_GPU_TESTS");
-        return;
-    }
     // Lanes below 24 run the permute; each reads lane (13 × lane + 5) mod 32
     // (its address in dwords, offset 20 bytes) of 1000 + lane.
     let shader = build(&[

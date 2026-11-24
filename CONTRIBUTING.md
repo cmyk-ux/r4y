@@ -37,7 +37,7 @@ A diagnostics build is separate:
 cargo build --profile diag --locked -p r4y --features diagnostics
 ```
 
-The first build downloads dependencies and compiles the workspace. GPU-dependent tests may require Windows Graphics Tools, DXC/validator components, a supported D3D12 driver, or a specific adapter. The generic GitHub-hosted Windows runner sets `R4Y_SKIP_HARDWARE_GPU_TESTS=1` only for the RDNA2 gather-reference and Wave32 lane-permute hardware tests, because it does not provide a guaranteed matching adapter. These tests remain enabled by default on local machines; do not set that variable when validating a real GPU. Report tests that were skipped rather than claiming the GPU path was tested.
+The first build downloads dependencies and compiles the workspace. GPU-dependent tests may require Windows Graphics Tools, DXC/validator components, a supported D3D12 driver, or a specific adapter. The generic GitHub-hosted Windows runner filters out only `gathers_at_a_level_match_the_hardware` (RDNA2 gather reference) and `permutes_read_the_lane_named_and_zero_from_lanes_left_out` (Wave32 lane permute) because it does not provide a guaranteed matching GPU. Plain local `cargo test --workspace --locked` still runs both tests. Report filtered tests rather than claiming the hardware path was tested.
 
 ## Runtime and GPU changes
 

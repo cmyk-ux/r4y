@@ -1348,11 +1348,11 @@ impl HostList {
     }
 
 
-        // Depth textures and their twins first, from their real states and
-        // back: the side each first use needs, made newer.
     /// At submission: move each texture the list uses from its real state
     /// to the state the list assumes at its start.
     fn prelude(&self) -> Option<ID3D12CommandList> {
+        // Depth textures and their twins first, from their real states and
+        // back: the side each first use needs, made newer.
         let twins = self.twins.lock().unwrap_or_else(|e| e.into_inner());
         let copies = crate::twin::at_submission(twins.values());
         drop(twins);
