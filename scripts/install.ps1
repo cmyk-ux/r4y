@@ -25,7 +25,7 @@ R4Y — Recompile4You
 
 Usage:
   r4y.cmd [options]
-  r4y-run.cmd [-- title arguments]
+  r4y-run.cmd
 
 Options:
   --dry-run       Check prerequisites without installing or writing setup files
