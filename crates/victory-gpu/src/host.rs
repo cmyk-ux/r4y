@@ -355,7 +355,7 @@ pub(crate) struct HostList {
     /// cannot leak a UAV state into a later IA/indirect use.
     buffers: Mutex<Buffers>,
     /// Buffer uses accumulated while binding the current draw/dispatch.
-    wanted: Mutex<Vec<(std::sync::Arc<crate::shadow::Shadow>, u32)>>,
+    wanted: Mutex<Wanted>,
     /// Depth textures with a writable twin the list uses (`crate::twin`),
     /// by host copy: the side its first use needs and the side it leaves
     /// newer.
@@ -398,6 +398,11 @@ type States = std::collections::HashMap<
 >;
 
 type Buffers = std::collections::HashMap<
+    usize,
+    (u32, std::sync::Arc<crate::shadow::Shadow>),
+>;
+
+type Wanted = std::collections::HashMap<
     usize,
     (u32, std::sync::Arc<crate::shadow::Shadow>),
 >;
@@ -1318,10 +1323,13 @@ impl HostList {
         shadow: &std::sync::Arc<crate::shadow::Shadow>,
         state: u32,
     ) {
-        self.wanted
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((shadow.clone(), state));
+        let key = std::sync::Arc::as_ptr(shadow) as usize;
+        let mut wanted = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((existing, _)) = wanted.get_mut(&key) {
+            *existing = buffer_together(*existing, state);
+        } else {
+            wanted.insert(key, (state, shadow.clone()));
+        }
     }
 
     /// Apply the combined access state for the current draw or dispatch.
@@ -1329,19 +1337,8 @@ impl HostList {
         let wanted = std::mem::take(
             &mut *self.wanted.lock().unwrap_or_else(|e| e.into_inner()),
         );
-        let mut settled: Vec<(std::sync::Arc<crate::shadow::Shadow>, u32)> = Vec::new();
-        for (shadow, state) in wanted {
-            if let Some((_, existing)) = settled
-                .iter_mut()
-                .find(|(candidate, _)| std::sync::Arc::ptr_eq(candidate, &shadow))
-            {
-                *existing = buffer_together(*existing, state);
-            } else {
-                settled.push((shadow, state));
-            }
-        }
-        for (shadow, state) in &settled {
-            self.buffer_state(shadow, *state);
+        for (_, (state, shadow)) in wanted {
+            self.buffer_state(&shadow, state);
         }
     }
 
