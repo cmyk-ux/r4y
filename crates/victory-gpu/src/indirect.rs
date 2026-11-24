@@ -19,9 +19,12 @@
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
+use std::sync::Arc;
+
 use windows::core::s;
 
-use crate::host::{HostList, host, transition};
+use crate::host::{BUFFER_INDIRECT, BUFFER_UAV, HostList, host, transition};
+use crate::shadow::Shadow;
 
 const SOURCE: &str = r#"
 #define RS "RootConstants(num32BitConstants=4, b0), UAV(u0), UAV(u1)"
@@ -146,7 +149,7 @@ fn make() -> windows::core::Result<Clamp> {
 /// after). False if the clamp is not available.
 pub(crate) fn bound(
     list: &HostList,
-    buffer: &ID3D12Resource,
+    shadow: &Arc<Shadow>,
     gpu: u64,
     (kind, stride, records): (u32, u32, u32),
 ) -> bool {
@@ -158,6 +161,7 @@ pub(crate) fn bound(
     }
     let l = &list.list;
     let constants = [kind, stride, records, 0];
+    list.buffer_state(shadow, BUFFER_UAV);
     // SAFETY: an open list; our root signature, pipeline and a live buffer
     // the caller's list holds.
     unsafe {
@@ -172,26 +176,20 @@ pub(crate) fn bound(
         l.ResourceBarrier(&[
             uav_barrier(),
             transition(
-                buffer,
+                &shadow.buffer,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
             ),
         ]);
     }
+    list.set_buffer_state(shadow, BUFFER_INDIRECT);
     true
 }
 
-/// After the execution: the buffer back to unordered access, where the
-/// title's passes keep using it.
-pub(crate) fn done(list: &HostList, buffer: &ID3D12Resource) {
-    // SAFETY: an open list and a live buffer.
-    unsafe {
-        list.list.ResourceBarrier(&[transition(
-            buffer,
-            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-        )])
-    };
+/// After the execution: the copy back to unordered access, where title
+/// passes may continue using it.
+pub(crate) fn done(list: &HostList, shadow: &Arc<Shadow>) {
+    list.buffer_state(shadow, BUFFER_UAV);
 }
 
 fn uav_barrier() -> D3D12_RESOURCE_BARRIER {

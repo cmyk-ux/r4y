@@ -31,6 +31,32 @@ pub(crate) fn texture_state(state: u32) -> u32 {
     pc_state(state) & !BUFFER_ONLY
 }
 
+/// Buffer states used by the title's shadow copies on the host GPU.
+pub(crate) const BUFFER_UAV: u32 = 0x8;
+pub(crate) const BUFFER_VERTEX_CONSTANT: u32 = 0x1;
+pub(crate) const BUFFER_INDEX: u32 = 0x2;
+pub(crate) const BUFFER_SHADER_RESOURCE: u32 = 0x40 | 0x80;
+pub(crate) const BUFFER_INDIRECT: u32 = 0x200;
+
+/// Move a tracked buffer to the state required by the next use.
+/// Read states are compatible and combine; UAV access is exclusive.
+pub(crate) fn buffer_after(before: u32, wanted: u32) -> u32 {
+    if before == 0 || (before | wanted) & BUFFER_UAV != 0 {
+        wanted
+    } else {
+        before | wanted
+    }
+}
+
+/// Merge all uses of one buffer within a single draw or dispatch.
+pub(crate) fn buffer_together(a: u32, b: u32) -> u32 {
+    if (a | b) & BUFFER_UAV != 0 {
+        BUFFER_UAV
+    } else {
+        a | b
+    }
+}
+
 /// Render target views live only until their command is recorded, so a
 /// ring of host descriptors is enough.
 const RTV_RING: u32 = 1024;
@@ -324,6 +350,12 @@ pub(crate) struct HostList {
     /// list names alive until it is reset, even if the title releases the
     /// resource first.
     states: Mutex<States>,
+    /// Shadow buffers and their state within this command list. Every list
+    /// starts and ends in COMMON, so recording order across worker threads
+    /// cannot leak a UAV state into a later IA/indirect use.
+    buffers: Mutex<Buffers>,
+    /// Buffer uses accumulated while binding the current draw/dispatch.
+    wanted: Mutex<Vec<(std::sync::Arc<crate::shadow::Shadow>, u32)>>,
     /// Depth textures with a writable twin the list uses (`crate::twin`),
     /// by host copy: the side its first use needs and the side it leaves
     /// newer.
@@ -363,6 +395,11 @@ type Note = (String, Option<(u64, u64)>);
 type States = std::collections::HashMap<
     usize,
     (u32, u32, std::sync::Arc<crate::resource::HostTexture>),
+>;
+
+type Buffers = std::collections::HashMap<
+    usize,
+    (u32, std::sync::Arc<crate::shadow::Shadow>),
 >;
 
 /// Whether device-removed data is on (`VICTORY_D3D12_DRED`, diagnostics
@@ -566,6 +603,8 @@ impl Host {
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
                 states: Mutex::default(),
+                buffers: Mutex::default(),
+                wanted: Mutex::default(),
                 twins: Mutex::default(),
                 rebind: false.into(),
                 prelude: (prelude_allocator, prelude),
@@ -1073,6 +1112,29 @@ impl HostList {
     }
 
     pub(crate) fn close(&self) {
+        // No draw may leave an uncommitted use behind. Return every touched
+        // shadow buffer to COMMON while this list is still open.
+        self.clear_wanted_buffers();
+        {
+            let mut buffers = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
+            let mut barriers = Vec::with_capacity(buffers.len());
+            for (state, shadow) in buffers.values_mut() {
+                if *state != 0 {
+                    barriers.push(transition(
+                        &shadow.buffer,
+                        D3D12_RESOURCE_STATES(*state as i32),
+                        D3D12_RESOURCE_STATE_COMMON,
+                    ));
+                    *state = 0;
+                }
+            }
+            if !barriers.is_empty() {
+                // SAFETY: the list is open and each shadow copy is kept alive.
+                unsafe { self.list.ResourceBarrier(&barriers) };
+            }
+            // Keep the Arc<Shadow> entries alive until reset(), which is
+            // called only after the submission fence has completed.
+        }
         #[cfg(feature = "diagnostics")]
         if let Some((heap, back)) = self.stamps() {
             let count = (self.notes.lock().unwrap_or_else(|e| e.into_inner()).len() as u32).min(STAMPS - 1);
@@ -1095,6 +1157,8 @@ impl HostList {
     pub(crate) fn reset(&self) {
         *self.deferred() = Deferred::default();
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.buffers.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.wanted.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.twins.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
@@ -1204,12 +1268,94 @@ impl HostList {
         self.rebind.swap(false, Ordering::Relaxed)
     }
 
-    /// At submission: the list that moves each texture this list uses from
-    /// its real state to the one the list starts with; the textures' real
-    /// states become those the list ends with.
-    fn prelude(&self) -> Option<ID3D12CommandList> {
+    /// Transition one shadow buffer from the state tracked by this list to
+    /// the state needed by the next operation.
+    pub(crate) fn buffer_state(
+        &self,
+        shadow: &std::sync::Arc<crate::shadow::Shadow>,
+        wanted: u32,
+    ) {
+        let mut buffers = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
+        let key = std::sync::Arc::as_ptr(shadow) as usize;
+        let before = buffers.get(&key).map_or(0, |entry| entry.0);
+        let after = buffer_after(before, wanted);
+        if after == before {
+            return;
+        }
+        buffers.insert(key, (after, shadow.clone()));
+        if before != 0 {
+            // SAFETY: this command list is open and retains the resource.
+            unsafe {
+                self.list.ResourceBarrier(&[transition(
+                    &shadow.buffer,
+                    D3D12_RESOURCE_STATES(before as i32),
+                    D3D12_RESOURCE_STATES(after as i32),
+                )])
+            };
+        }
+    }
+
+    /// Record the state left by an explicit barrier already emitted by a
+    /// specialized operation (the indirect-argument clamp).
+    pub(crate) fn set_buffer_state(
+        &self,
+        shadow: &std::sync::Arc<crate::shadow::Shadow>,
+        state: u32,
+    ) {
+        self.buffers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                std::sync::Arc::as_ptr(shadow) as usize,
+                (state, shadow.clone()),
+            );
+    }
+
+    /// Add a use made by a descriptor/root binding. Uses of the same buffer
+    /// are coalesced before barriers are recorded.
+    pub(crate) fn want_buffer(
+        &self,
+        shadow: &std::sync::Arc<crate::shadow::Shadow>,
+        state: u32,
+    ) {
+        self.wanted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((shadow.clone(), state));
+    }
+
+    /// Apply the combined access state for the current draw or dispatch.
+    pub(crate) fn settle_buffers(&self) {
+        let wanted = std::mem::take(
+            &mut *self.wanted.lock().unwrap_or_else(|e| e.into_inner()),
+        );
+        let mut settled: Vec<(std::sync::Arc<crate::shadow::Shadow>, u32)> = Vec::new();
+        for (shadow, state) in wanted {
+            if let Some((_, existing)) = settled
+                .iter_mut()
+                .find(|(candidate, _)| std::sync::Arc::ptr_eq(candidate, &shadow))
+            {
+                *existing = buffer_together(*existing, state);
+            } else {
+                settled.push((shadow, state));
+            }
+        }
+        for (shadow, state) in &settled {
+            self.buffer_state(shadow, *state);
+        }
+    }
+
+    /// Drop uncommitted uses if a draw/dispatch cannot be translated.
+    pub(crate) fn clear_wanted_buffers(&self) {
+        self.wanted.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+
         // Depth textures and their twins first, from their real states and
         // back: the side each first use needs, made newer.
+    /// At submission: move each texture the list uses from its real state
+    /// to the state the list assumes at its start.
+    fn prelude(&self) -> Option<ID3D12CommandList> {
         let twins = self.twins.lock().unwrap_or_else(|e| e.into_inner());
         let copies = crate::twin::at_submission(twins.values());
         drop(twins);
@@ -2581,6 +2727,53 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
              before {n_before} hashes in {before:?}, after {n_after} in {after:?} ({:.1}x)",
             SIZE >> 20,
             before.as_secs_f64() / after.as_secs_f64()
+        );
+    }
+}
+
+
+#[cfg(test)]
+mod buffer_states {
+    use super::{
+        BUFFER_INDEX, BUFFER_INDIRECT, BUFFER_SHADER_RESOURCE, BUFFER_UAV,
+        BUFFER_VERTEX_CONSTANT, buffer_after, buffer_together,
+    };
+
+    #[test]
+    fn first_use_leaves_common_state_implicitly() {
+        for state in [BUFFER_VERTEX_CONSTANT, BUFFER_INDEX, BUFFER_SHADER_RESOURCE, BUFFER_UAV] {
+            assert_eq!(buffer_after(0, state), state);
+        }
+    }
+
+    #[test]
+    fn vertex_data_written_by_compute_is_moved_out_of_uav() {
+        assert_eq!(buffer_after(BUFFER_UAV, BUFFER_VERTEX_CONSTANT), BUFFER_VERTEX_CONSTANT);
+    }
+
+    #[test]
+    fn compatible_read_states_combine() {
+        let both = buffer_after(BUFFER_VERTEX_CONSTANT, BUFFER_INDEX);
+        assert_eq!(both, BUFFER_VERTEX_CONSTANT | BUFFER_INDEX);
+        assert_eq!(buffer_after(both, BUFFER_INDEX), both);
+        assert_eq!(buffer_after(both, BUFFER_SHADER_RESOURCE),
+            BUFFER_VERTEX_CONSTANT | BUFFER_INDEX | BUFFER_SHADER_RESOURCE);
+    }
+
+    #[test]
+    fn uav_is_exclusive() {
+        let reads = BUFFER_VERTEX_CONSTANT | BUFFER_INDIRECT;
+        assert_eq!(buffer_after(reads, BUFFER_UAV), BUFFER_UAV);
+        assert_eq!(buffer_after(BUFFER_UAV, BUFFER_UAV), BUFFER_UAV);
+        assert_eq!(buffer_together(BUFFER_SHADER_RESOURCE, BUFFER_UAV), BUFFER_UAV);
+        assert_eq!(buffer_together(BUFFER_UAV, BUFFER_SHADER_RESOURCE), BUFFER_UAV);
+    }
+
+    #[test]
+    fn all_read_uses_of_one_draw_are_combined() {
+        assert_eq!(
+            buffer_together(BUFFER_SHADER_RESOURCE, BUFFER_VERTEX_CONSTANT),
+            BUFFER_SHADER_RESOURCE | BUFFER_VERTEX_CONSTANT
         );
     }
 }

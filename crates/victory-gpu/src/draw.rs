@@ -19,7 +19,10 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 use windows::core::Interface;
 
-use crate::host::HostList;
+use crate::host::{
+    BUFFER_INDEX, BUFFER_INDIRECT, BUFFER_SHADER_RESOURCE, BUFFER_UAV, BUFFER_VERTEX_CONSTANT,
+    HostList,
+};
 use crate::object::This;
 use crate::pipeline::host::HostPipeline;
 
@@ -196,6 +199,16 @@ fn root_view(list: &HostList, address: u64, srv: bool, uav: bool) -> Option<u64>
         if uav {
             shadow.gpu_writes(list, address, len);
         }
+        list.want_buffer(
+            &shadow,
+            if uav {
+                BUFFER_UAV
+            } else if srv {
+                BUFFER_SHADER_RESOURCE
+            } else {
+                BUFFER_VERTEX_CONSTANT
+            },
+        );
         return Some(gpu);
     }
     let (gpu, to) = list.scratch(len)?;
@@ -455,6 +468,7 @@ impl State {
                 continue;
             };
             shadow.refresh(list, v.address, u64::from(v.size));
+            list.buffer_state(&shadow, BUFFER_VERTEX_CONSTANT);
             *view = D3D12_VERTEX_BUFFER_VIEW {
                 BufferLocation: shadow.gpu(v.address),
                 SizeInBytes: v.size,
@@ -474,6 +488,7 @@ impl State {
                 return false;
             };
             shadow.refresh(list, v.address, u64::from(v.size));
+            list.buffer_state(&shadow, BUFFER_INDEX);
             let view = D3D12_INDEX_BUFFER_VIEW {
                 BufferLocation: shadow.gpu(v.address),
                 SizeInBytes: v.size,
@@ -585,6 +600,8 @@ impl State {
                     );
                 }
                 not_run("no dynamic slots for its tables");
+                list.clear_wanted_buffers();
+
                 return false;
             }
             // Root views a shader reads as title memory: the copies holding
@@ -653,6 +670,8 @@ impl State {
                         let Some(table) = heap.and_then(|h| h.strides()) else {
                             once!("a shader reads view strides without a view heap: dropped");
                             not_run("view strides without a view heap");
+                            list.clear_wanted_buffers();
+
                             return false;
                         };
                         list.keep(table);
@@ -697,6 +716,8 @@ impl State {
                 let Some(gpu) = gpu else {
                     once!("a shader reading a view's address dropped: no view heap");
                     not_run("view addresses without a view heap");
+                    list.clear_wanted_buffers();
+
                     return false;
                 };
                 // SAFETY: an open list; the heap's buffer lives with the heap.
@@ -712,9 +733,17 @@ impl State {
                 let Some((table, dirty)) = self.memory_map(list) else {
                     once!("a shader reading title memory dropped: no view heap or page table");
                     not_run("title memory without a view heap or page table");
+                    list.clear_wanted_buffers();
+
                     return false;
                 };
                 crate::memory::note_use(&p.name);
+                // The page table exposes the shadow copies through SRV
+                // descriptors. Any copy that is also written by this shader
+                // is upgraded to UAV when the uses are coalesced below.
+                for shadow in crate::shadow::all() {
+                    list.want_buffer(&shadow, BUFFER_SHADER_RESOURCE);
+                }
                 // What shaders write through a root UAV goes back by its
                 // bytes, as through root views ([`root_view`]).
                 for (address, shadow) in &roots {
@@ -722,6 +751,7 @@ impl State {
                         let len = shadow.left(*address).min(1 << 20);
                         shadow.refresh(list, *address, len);
                         shadow.gpu_writes(list, *address, len);
+                        list.want_buffer(shadow, BUFFER_UAV);
                         map.precise(*address, len);
                     }
                 }
@@ -744,6 +774,7 @@ impl State {
         }
         #[cfg(feature = "diagnostics")]
         crate::capture::binding("");
+        list.settle_buffers();
         true
     }
 
@@ -770,6 +801,10 @@ impl State {
         if uav {
             shadow.gpu_writes(list, address, shadow.left(address).min(1 << 20));
         }
+        list.want_buffer(
+            &shadow,
+            if uav { BUFFER_UAV } else { BUFFER_SHADER_RESOURCE },
+        );
         let (key, host) = match self.heaps[0] {
             0 => (MEMORY_HEAP, crate::memory::heap()?),
             h => (
@@ -1543,7 +1578,7 @@ impl State {
             s.refresh(list, *at, 4);
         }
         // Bounded first: the clamp binds a compute pipeline of its own.
-        if !crate::indirect::bound(list, &args.buffer, args.gpu(arguments), (kind, stride, max)) {
+        if !crate::indirect::bound(list, &args, args.gpu(arguments), (kind, stride, max)) {
             why("not bounded (no clamp, or arguments not 4-byte aligned)");
             return false;
         }
@@ -1564,7 +1599,7 @@ impl State {
             _ => false,
         };
         if !ran {
-            crate::indirect::done(list, &args.buffer);
+            crate::indirect::done(list, &args);
             #[cfg(feature = "diagnostics")]
             match crate::pipeline::host_pipeline(self.pipeline as This) {
                 None => {
@@ -1584,6 +1619,12 @@ impl State {
         list.note_op(|| {
             self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}"), kind == DISPATCH)
         });
+        // Arguments and the optional count are read in INDIRECT_ARGUMENT
+        // state, after the clamp or any preceding shader access.
+        list.buffer_state(&args, BUFFER_INDIRECT);
+        if let Some((counter_shadow, _)) = &counter {
+            list.buffer_state(counter_shadow, BUFFER_INDIRECT);
+        }
         // SAFETY: an open list with everything set; the buffers are host
         // copies the list keeps alive (refresh), the signature is cached.
         unsafe {
