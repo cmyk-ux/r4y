@@ -1,0 +1,26 @@
+# Copy to %LOCALAPPDATA%\R4Y\r4y.toml, then edit the paths.
+# All paths must be outside the R4Y source repository.
+# Environment variables take precedence over this file. R4Y_CONFIG selects
+# a different file; VICTORY_CONFIG is accepted as a legacy alias.
+
+[paths]
+# Your own copy of the game, already readable on disk.
+# env: R4Y_GAME_DIR
+game_dir = 'D:\R4Y-data\game'
+
+# Derived shader/pipeline cache. Default: %LOCALAPPDATA%\R4Y\cache.
+# env: R4Y_CACHE_DIR
+# cache_dir = 'D:\R4Y-data\cache'
+
+# Persistent local title data and saves, kept apart from the cache.
+# Default: %LOCALAPPDATA%\R4Y\data.
+# env: R4Y_DATA_DIR
+# data_dir = 'D:\R4Y-data\data'
+
+# Optional AMD FidelityFX for PC (folder containing the upscaler DLL).
+# env: R4Y_FIDELITYFX_DIR
+# fidelityfx_dir = 'D:\R4Y-data\fidelityfx'
+
+# Other Xbox Series titles used to test platform-level code.
+# env: R4Y_TEST_TITLES (PATH-separated)
+test_titles = []

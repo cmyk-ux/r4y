@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate the PowerShell installer and read-only preflight
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path ./scripts/install.ps1), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { $errors | Format-List; exit 1 }
+          ./scripts/install.ps1 -OptionString '--dry-run'
+      # The version and components pinned in rust-toolchain.toml.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Clippy, diagnostics build
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # Build the one user-facing R4Y executable.
+      - name: Build R4Y
+        run: cargo build --release --locked -p r4y
+      # The hosted runner has no guaranteed RDNA2/Wave32 GPU. These two
+      # hardware-reference tests remain enabled for local supported hardware.
+      - name: Tests
+        run: cargo test --workspace --locked -- --skip gathers_at_a_level_match_the_hardware --skip permutes_read_the_lane_named_and_zero_from_lanes_left_out
