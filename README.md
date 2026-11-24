@@ -1,106 +1,114 @@
 # R4Y — Recompile4You
 
-Camada de compatibilidade que roda **Grand Theft Auto VI (Xbox Series X|S)** nativamente no Windows, a partir de arquivos **do seu próprio jogo**, já legíveis em disco.
+A compatibility layer that runs **Grand Theft Auto VI (Xbox Series X|S)** natively on Windows, using files **from your own copy of the game**, already readable on disk.
 
-O R4Y reúne quatro linhas de trabalho abertas (detalhes em [docs/INTEGRACAO.md](docs/INTEGRACAO.md)):
+R4Y brings together four open-source workstreams (see [docs/INTEGRACAO.md](docs/INTEGRACAO.md) for details):
 
-| Origem | O que traz para o R4Y |
+| Source | What it brings to R4Y |
 |---|---|
-| [Marvisak/VIctory](https://github.com/Marvisak/VIctory) | Núcleo: loader, serviços de runtime, backend D3D12 e recompilador de shaders (RDNA2 → DXIL). **É o que o `r4y.cmd` compila.** |
-| [fxceless/victory-gta6](https://github.com/fxceless/victory-gta6) | Fork do VIctory com correções de render e velocidade (canal `fork`). |
-| [cmyk-ux/Leonida](https://github.com/cmyk-ux/Leonida) | O modelo do instalador de um clique e o pré-teste de hardware. |
-| [xcl-dev/xcl](https://github.com/xcl-dev/xcl) | Referência de comportamento e diagnóstico. **Nenhum código copiado** (licença incompatível). |
+| [Marvisak/VIctory](https://github.com/Marvisak/VIctory) | Core: loader, runtime services, D3D12 backend, and shader recompiler (RDNA2 → DXIL). **This is what `r4y.cmd` builds.** |
+| [cmyk-ux/Leonida](https://github.com/cmyk-ux/Leonida) | The one-click installer model and hardware pre-check. rip. |
 
 > [!IMPORTANT]
-> Este repositório **não contém o jogo, chaves, executáveis nem assets**, e não explica como obtê-los. Você precisa da sua própria cópia, com os arquivos já legíveis em disco. Nada aqui descriptografa ou contorna proteção. Grand Theft Auto e nomes relacionados são marcas de seus donos; o projeto não é afiliado à Rockstar Games nem à Take-Two.
+> This repository **does not contain the game, keys, executables, or assets**, nor does it explain how to obtain them. You need your own copy, with its files already readable on disk. Nothing here decrypts or bypasses any protection. Grand Theft Auto and related names are trademarks of their respective owners; this project is not affiliated with Rockstar Games or Take-Two.
 
 ## Status
 
-**Ainda não jogável.** Depende do núcleo escolhido, segundo os READMEs das fontes em 2026-11-24:
+**Not yet playable.** Progress depends on the selected core, according to the source repositories' READMEs as of 2026-11-24:
 
-- `upstream` (VIctory): boot, menus a 30 fps e carregamento do mundo funcionam; a renderização do mundo ainda falha ou é muito lenta.
-- `fork` (victory-gta6): abertura e primeiro trecho jogável renderizam, em 2–4 fps; áreas em sombra ficam pretas (ray tracing ainda não roda).
+- `upstream` (VIctory): Boot, menus at 30 FPS, and world loading work; world rendering still fails or is extremely slow.
+- `fork` (victory-gta6): The opening and first playable section render at 2–4 FPS; shadowed areas appear black (ray tracing is not yet working).
 
-O R4Y por si só não melhora esses números.
+R4Y itself does not improve these performance figures.
 
-## Requisitos
+## Requirements
 
-- Windows 10/11 x64, CPU com AVX2.
-- GPU Direct3D 12 com Shader Model 6.6 (e mesh shaders para o mundo).
-- Vários GiB de *commit* livres na inicialização (Gerenciador de Tarefas → Desempenho → Memória → **Confirmado**). Se `crashes.log` citar o erro 1455, feche programas ou aumente o arquivo de paginação.
-- O `r4y.cmd` instala o que faltar, com sua confirmação, via `winget`: Git, Rustup e Visual Studio 2022 Build Tools (C++ e Windows SDK).
-- Recomendado: DXC 1.8 ou mais novo (o 1.7 gera DXIL bem maior e pode demorar muito para compilar pipelines em NVIDIA).
+- Windows 10/11 x64, CPU with AVX2 support.
+- Direct3D 12 GPU with Shader Model 6.6 (and mesh shaders for the world).
+- Several GiB of free commit available at startup (Task Manager → Performance → Memory → **Committed**). If `crashes.log` mentions error 1455, close other programs or increase the paging file.
+- `r4y.cmd` installs any missing dependencies, with your confirmation, through `winget`: Git, Rustup, and Visual Studio 2022 Build Tools (C++ and Windows SDK).
+- Recommended: DXC 1.8 or newer (DXC 1.7 generates significantly larger DXIL and may take a very long time to compile pipelines on NVIDIA GPUs).
 
-## Build fácil (um clique)
+## Easy Build (One Click)
 
-1. `git clone https://github.com/cmyk-ux/r4y` (use clone: o `.gitattributes` converte o `.cmd` para CRLF; o "Download ZIP" pode trazer quebras de linha erradas).
-2. Dê dois cliques em **`r4y.cmd`**.
+1. `git clone https://github.com/cmyk-ux/r4y` (use `git clone`: `.gitattributes` converts the `.cmd` file to CRLF; downloading the ZIP may result in incorrect line endings).
+2. Double-click **`r4y.cmd`**.
 
-Passos, nesta ordem:
+The script performs the following steps, in order:
 
-1. Verifica Windows, AVX2, GPU e memória de commit.
-2. Lista o que falta e instala com consentimento.
-3. Baixa/atualiza o núcleo em `src\r4y-core` e aplica os patches de `patches\`.
-4. **Pergunta a pasta do jogo e o executável** que você quer rodar (digitando ou pelo seletor; lembra da última escolha).
-5. Grava a configuração fora do repositório do núcleo (`config\r4y.toml`) e compila em release.
-6. Copia para `bin\r4y.exe` e checa a configuração e o executável escolhido.
-7. Cria `r4y-run.cmd` e pergunta se quer iniciar agora.
+1. Checks Windows, AVX2, GPU, and commit memory.
+2. Lists missing dependencies and installs them with your consent.
+3. Downloads/updates the core into `src\r4y-core` and applies the patches from `patches\`.
+4. **Asks for the game folder and executable** you want to run (you can type the path or use the file picker; your last selection is remembered).
+5. Saves the configuration outside the core repository (`config\r4y.toml`) and builds in release mode.
+6. Copies the binary to `bin\r4y.exe` and validates the configuration and selected executable.
+7. Creates `r4y-run.cmd` and asks whether you want to launch the game immediately.
 
-Rodar de novo atualiza o núcleo e recompila de forma incremental.
+Running it again updates the core and performs an incremental rebuild.
 
-### Opções
+### Options
 
-```
+```text
 r4y.cmd [--dry-run] [--no-build] [--no-run] [--yes] [--test] [--channel upstream|fork]
 
-  --dry-run   só mostra o que falta; não altera nada
-  --no-build  prepara tudo e grava a configuração, mas não compila
-  --no-run    compila e checa, mas não pergunta se quer iniciar
-  --yes       não pede confirmação para instalar pacotes
-  --test      roda também cargo test --workspace (não usa dados do jogo)
-  --channel   upstream (padrão) ou fork
+  --dry-run   only shows what's missing; makes no changes
+  --no-build  prepares everything and saves the configuration, but does not build
+  --no-run    builds and validates, but does not ask whether to launch
+  --yes       skips installation confirmation prompts
+  --test      also runs cargo test --workspace (does not use game data)
+  --channel   upstream (default) or fork
 ```
 
-Ao trocar de canal, `src\r4y-core` é redefinido para o novo repositório: não guarde alterações suas lá.
+When switching channels, `src\r4y-core` is reset to the new repository. Do not store your own changes there.
 
-## Build manual
+## Manual Build
 
 ```powershell
 git clone --depth 1 https://github.com/Marvisak/VIctory src\r4y-core
 mkdir config
-copy src\r4y-core\victory.example.toml config\r4y.toml    # edite game_dir (fora de src\)
+copy src\r4y-core\victory.example.toml config\r4y.toml    # edit game_dir (outside src\)
 $env:VICTORY_CONFIG = "$PWD\config\r4y.toml"
 cd src\r4y-core
 cargo build --release -p victory
 target\release\victory.exe config
-target\release\victory.exe run "D:\SeuJogo\executavel.exe" --execute
+target\release\victory.exe run "D:\YourGame\executable.exe" --execute
 ```
 
-## Depois de instalado
+## After Installation
 
-Use `r4y-run.cmd`. Para outro jogo/executável, rode `r4y.cmd` de novo. A pasta do jogo nunca é modificada; saves e `crashes.log` ficam em `%LOCALAPPDATA%\victory\data`.
+Use `r4y-run.cmd`. To select another game/executable, run `r4y.cmd` again. The game folder is never modified; save files and `crashes.log` are stored in `%LOCALAPPDATA%\victory\data`.
 
-Variáveis que o `r4y-run.cmd` traduz: `R4Y_LOG`, `R4Y_D3D12_DEBUG`, `R4Y_D3D12_WARP` → `VICTORY_LOG`, `VICTORY_D3D12_DEBUG`, `VICTORY_D3D12_WARP`. Modo sem risco de resetar o driver: `set R4Y_D3D12_WARP=1` (renderiza no adaptador por software; lento).
+Environment variables translated by `r4y-run.cmd`:
 
-> **Aviso.** Entrar no mundo em GPU real pode travar a GPU; o Windows então reinicia o driver de vídeo (os monitores ficam pretos por um instante).
+`R4Y_LOG`, `R4Y_D3D12_DEBUG`, `R4Y_D3D12_WARP` → `VICTORY_LOG`, `VICTORY_D3D12_DEBUG`, `VICTORY_D3D12_WARP`.
 
-## Estrutura
+Safe mode that avoids GPU driver resets:
 
-```
-r4y.cmd             instalador/atualizador/compilador de um clique
-patches/            patches aplicados sobre o núcleo (*.patch, em ordem)
-docs/INTEGRACAO.md  como as fontes se ligam e o que foi aproveitado
-NOTICE.md           créditos e licenças
+```cmd
+set R4Y_D3D12_WARP=1
 ```
 
-`src\`, `bin\`, `build\`, `config\` e logs são gerados na sua máquina e ficam fora do git.
+This renders through the software adapter and is therefore slow.
 
-## Limitações desta versão
+> **Warning.** Entering the game world on a physical GPU may cause the GPU to hang, forcing Windows to restart the graphics driver (your monitors will briefly go black).
 
-- O nome R4Y está no instalador, no binário (`r4y.exe`), nos launchers e na documentação. Identificadores internos do código do núcleo (crates `victory_*`, variáveis `VICTORY_*`) continuam originais, porque o código é baixado do upstream no build.
-- O `r4y.cmd` foi escrito sem poder ser executado em Windows; teste e relate falhas em issues.
-- O pipeline de assets do Leonida (Python/Vulkan, cerca de 400 GB) não está ligado ao instalador.
+## Project Structure
 
-## Licença
+```text
+r4y.cmd             one-click installer/updater/builder
+patches/            patches applied to the core (*.patch, in order)
+docs/INTEGRACAO.md  how the source projects are integrated and what was reused
+NOTICE.md           credits and licenses
+```
 
-GPL-3.0-or-later. Veja `LICENSE` e [NOTICE.md](NOTICE.md).
+`src\`, `bin\`, `build\`, `config\`, and logs are generated locally and are excluded from git.
+
+## Current Version Limitations
+
+- The R4Y name is used throughout the installer, binary (`r4y.exe`), launchers, and documentation. Internal identifiers in the core code (`victory_*` crates, `VICTORY_*` variables) remain unchanged because the code is downloaded from upstream during the build.
+- `r4y.cmd` was written without being executed on Windows. Please test it and report any issues.
+- The Leonida asset pipeline (Python/Vulkan, approximately 400 GB) is not integrated into the installer.
+
+## License
+
+GPL-3.0-or-later. See `LICENSE` and [NOTICE.md](NOTICE.md).
