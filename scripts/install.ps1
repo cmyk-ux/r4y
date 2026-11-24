@@ -74,8 +74,9 @@ function Invoke-Native([string]$Executable, [string[]]$NativeArgs, [string]$Work
     $previous = Get-Location
     try {
         if ($WorkingDirectory) { Set-Location -LiteralPath $WorkingDirectory }
-        & $Executable @NativeArgs
-        return [int]$LASTEXITCODE
+        & $Executable @NativeArgs 2>&1 | ForEach-Object { Write-Host $_ }
+        $nativeExitCode = [int]$LASTEXITCODE
+        return $nativeExitCode
     } finally { Set-Location $previous }
 }
 
@@ -335,7 +336,10 @@ function Invoke-Launch {
 function Invoke-Setup {
     if (-not [Environment]::Is64BitOperatingSystem) { throw 'R4Y requires Windows x64.' }
     $os = Get-CimInstance Win32_OperatingSystem
-    if ($os.Caption -notmatch 'Windows 10|Windows 11') { throw ('Unsupported Windows version: ' + $os.Caption) }
+    $isClientWindows = $os.Caption -match 'Windows 10|Windows 11'
+    $isActionsServerDryRun = $script:DryRun -and $os.Caption -match 'Windows Server 2025'
+    if (-not $isClientWindows -and -not $isActionsServerDryRun) { throw ('Unsupported Windows version: ' + $os.Caption) }
+    if ($isActionsServerDryRun) { Write-Warn 'Windows Server is allowed here only for CI dry-run validation; normal installation still requires Windows 10/11.' }
     Show-Hardware
     $missing = @(Get-MissingPrerequisites)
     if ($missing.Count -gt 0) {
