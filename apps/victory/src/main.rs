@@ -1,4 +1,4 @@
-//! `victory`: the command-line front end.
+//! `r4y`: the R4Y command-line front end.
 //!
 //! Every command reads the user's own files and writes only to stdout or to
 //! the user's cache directory (outside the repository).
@@ -17,9 +17,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
-    name = "victory",
+    name = "r4y",
     version,
-    about = "Run an Xbox Series title natively on Windows"
+    about = "R4Y: run an Xbox Series title natively on Windows"
 )]
 struct Cli {
     #[command(subcommand)]

@@ -1,7 +1,7 @@
 # R4Y Windows installer and launcher.
 # One workspace, one runtime. No runtime/backend download or selection.
 [CmdletBinding()]
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+param([string]$OptionString = '')
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -17,9 +17,6 @@ $script:AssumeYes = $false
 $script:RunTests = $false
 $script:Diagnostics = $false
 $script:LaunchOnly = $false
-$script:GamePath = $null
-$script:ExePath = $null
-$script:TitleArgs = @()
 $script:TranscriptStarted = $false
 
 function Show-Help {
@@ -37,8 +34,6 @@ Options:
   --yes           Accept prerequisite installation prompts
   --test          Run cargo test --workspace --locked before building
   --diagnostics   Build the diagnostics profile instead of normal release
-  --game PATH     Select a game folder without opening the folder picker
-  --exe PATH      Select an executable inside the selected folder
   --launch        Launch the last configured game without running setup
   --help          Show this help
 
@@ -46,7 +41,8 @@ R4Y builds the one Rust workspace in this repository. No additional engine is do
 '@ | Write-Host
 }
 
-function Parse-Arguments([string[]]$Items) {
+function Parse-Arguments([string]$Line) {
+    $Items = @($Line -split '\s+' | Where-Object { $_ })
     for ($i = 0; $i -lt $Items.Count; $i++) {
         switch -CaseSensitive ($Items[$i]) {
             '--dry-run' { $script:DryRun = $true }
@@ -58,20 +54,6 @@ function Parse-Arguments([string[]]$Items) {
             '--launch' { $script:LaunchOnly = $true }
             '--help' { Show-Help; exit 0 }
             '-h' { Show-Help; exit 0 }
-            '--game' {
-                $i++
-                if ($i -ge $Items.Count) { throw '--game requires a folder path.' }
-                $script:GamePath = $Items[$i]
-            }
-            '--exe' {
-                $i++
-                if ($i -ge $Items.Count) { throw '--exe requires an executable path.' }
-                $script:ExePath = $Items[$i]
-            }
-            '--' {
-                if ($i + 1 -lt $Items.Count) { $script:TitleArgs = @($Items[($i + 1)..($Items.Count - 1)]) }
-                return
-            }
             default { throw ('Unknown option: ' + $Items[$i] + '. Use --help.') }
         }
     }
@@ -230,7 +212,7 @@ function Save-State([string]$GameDirectory, [string]$Executable) {
 
 function Select-Game {
     $state = Load-State
-    if (-not $script:GamePath -and -not $script:ExePath -and $state -and $state.game_dir -and $state.exe -and
+    if ($state -and $state.game_dir -and $state.exe -and
         (Test-Path -LiteralPath $state.game_dir -PathType Container) -and (Test-Path -LiteralPath $state.exe -PathType Leaf)) {
         if ($script:AssumeYes) { return @($state.game_dir, $state.exe) }
         if (-not [Console]::IsInputRedirected) {
@@ -239,8 +221,8 @@ function Select-Game {
         }
     }
 
-    $directory = $script:GamePath
-    if (-not $directory -and -not [Console]::IsInputRedirected) {
+    $directory = $null
+    if (-not [Console]::IsInputRedirected) {
         $typed = Read-Host 'Enter the game folder, or press ENTER to browse'
         if ($typed) { $directory = $typed.Trim().Trim('"') }
     }
@@ -248,8 +230,8 @@ function Select-Game {
     if (-not $directory -or -not (Test-Path -LiteralPath $directory -PathType Container)) { throw 'A valid game folder was not selected.' }
     $directory = (Resolve-Path -LiteralPath $directory).ProviderPath
 
-    $executable = $script:ExePath
-    if (-not $executable) {
+    $executable = $null
+    {
         $found = @()
         $found += @(Get-ChildItem -LiteralPath $directory -Filter '*.exe' -File -ErrorAction SilentlyContinue)
         foreach ($child in (Get-ChildItem -LiteralPath $directory -Directory -ErrorAction SilentlyContinue)) {
@@ -346,7 +328,7 @@ function Invoke-Launch {
     $script:Diagnostics = ([string]$state.profile -eq 'diag')
     $binary = Get-R4YExecutable
     if (-not $binary) { throw 'R4Y is not built. Run r4y.cmd to compile the workspace.' }
-    $runArgs = @('run', [string]$state.exe, '--execute') + $script:TitleArgs
+    $runArgs = @('run', [string]$state.exe, '--execute')
     return (Invoke-Native $binary $runArgs $script:Root)
 }
 
@@ -371,8 +353,8 @@ function Invoke-Setup {
     Write-Step 'Select your game folder and executable'
     $selection = Select-Game
     $gameDirectory = [string]$selection[0]
-    $script:ExePath = [string]$selection[1]
-    Write-Config $gameDirectory $script:ExePath
+    $exePath = [string]$selection[1]
+    Write-Config $gameDirectory $exePath
 
     if ($script:NoBuild) {
         Write-Ok 'Configuration saved; build skipped by --no-build.'
@@ -382,7 +364,7 @@ function Invoke-Setup {
     $binary = Build-R4Y $cargo
     $env:R4Y_CONFIG = $script:ConfigPath
     $env:VICTORY_CONFIG = $script:ConfigPath
-    $inspect = Invoke-Native $binary @('inspect', $script:ExePath) $script:Root
+    $inspect = Invoke-Native $binary @('inspect', $exePath) $script:Root
     if ($inspect -ne 0) { throw 'R4Y could not inspect the selected executable. Check the game folder and executable.' }
     Write-Launcher
     Write-Ok 'R4Y is ready. Use r4y-run.cmd to launch later.'
@@ -408,7 +390,7 @@ function Write-Launcher {
 
 $exitCode = 1
 try {
-    Parse-Arguments $Arguments
+    Parse-Arguments $OptionString
     if (-not $script:LaunchOnly -and -not $script:DryRun) {
         New-Item -ItemType Directory -Force -Path (Join-Path $script:LocalRoot 'logs') | Out-Null
         try { Start-Transcript -Path $script:LogPath -Append | Out-Null; $script:TranscriptStarted = $true } catch {}
