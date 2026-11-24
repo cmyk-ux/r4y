@@ -637,14 +637,20 @@ impl State {
                             };
                             match offset {
                                 Some(offset) => offset,
-                                None => return false,
+                                None => {
+                                    list.clear_wanted_buffers();
+                                    return false;
+                                },
                             }
                         }
                         None if is_root_view(u) => {
                             let uav = u.dword == victory_shader::emit::ROOT_UAV_VIEW;
                             match self.root_view(list, compute, u.slot, uav) {
                                 Some((slot, _)) => slot,
-                                None => return false,
+                                None => {
+                                    list.clear_wanted_buffers();
+                                    return false;
+                                },
                             }
                         }
                         None => self.user_value(compute, u.slot, u.root, u.dword),
