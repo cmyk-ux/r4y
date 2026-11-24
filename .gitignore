@@ -1,0 +1,12 @@
+# Gerado na sua maquina pelo r4y.cmd
+src/
+bin/
+build/
+config/
+r4y-run.cmd
+*.log
+# Nunca versionar dados do jogo
+*.rpf
+*.xvc
+*.msixvc
+*.ttpf
