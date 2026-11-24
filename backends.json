@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "default_backend": "minevictory",
+  "backends": {
+    "upstream": {
+      "name": "VIctory upstream",
+      "repository": "https://github.com/Marvisak/VIctory.git",
+      "branch": "main",
+      "package": "victory",
+      "binary": "victory.exe",
+      "engine": "victory"
+    },
+    "minevictory": {
+      "name": "R4Y / MineVIctory",
+      "repository": "https://github.com/cmyk-ux/minevictory.git",
+      "branch": "main",
+      "package": "victory",
+      "binary": "victory.exe",
+      "engine": "victory"
+    },
+    "xcl": {
+      "name": "R4Y / Minexcl",
+      "repository": "https://github.com/cmyk-ux/minexcl.git",
+      "branch": "main",
+      "package": "xcl",
+      "binary": "xcl.exe",
+      "engine": "xcl"
+    }
+  }
+}

@@ -1,8 +1,17 @@
-# patches/
+# Backend patches
 
-Coloque aqui arquivos `*.patch` (formato `git diff`) para serem aplicados sobre o nucleo baixado em `src/r4y-core`.
-O `r4y.cmd` os aplica em ordem alfabetica depois de cada atualizacao. Um patch que nao aplica na versao atual e
-ignorado com um aviso (nao interrompe o build).
+Place backend-specific unified Git patches in a matching subdirectory:
 
-Candidato natural: a correcao de estados de buffer do PR Marvisak/VIctory#479 (issue #445), em forma de patch
-rebaseado sobre o `main` atual. Nao incluido aqui porque nao foi rebaseado nem testado.
+```text
+patches/
+  minevictory/
+    0001-example-fix.patch
+  upstream/
+    0001-example-fix.patch
+  xcl/
+    0001-example-fix.patch
+```
+
+R4Y applies patches in filename order after updating that backend's clean checkout. A patch that does not apply is a hard error: this prevents a requested fix from being silently omitted. The legacy top-level `patches/*.patch` location is still read for `upstream` and `minevictory` during migration.
+
+Keep patches small, explain their upstream status in the commit message, and test them against the exact backend revision in the pull request.

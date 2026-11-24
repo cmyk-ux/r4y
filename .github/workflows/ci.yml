@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer-validation:
+    name: Installer and manifest validation
+    runs-on: windows-latest
+    steps:
+      - name: Check out R4Y
+        uses: actions/checkout@v4
+      - name: Validate backend registry and launcher
+        shell: pwsh
+        run: ./scripts/r4y.ps1 --validate-only
+
+  backend-build:
+    name: Build ${{ matrix.backend }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [minevictory, upstream, xcl]
+    steps:
+      - name: Check out R4Y
+        uses: actions/checkout@v4
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Clone selected backend
+        shell: pwsh
+        run: |
+          $registry = Get-Content ./backends.json -Raw | ConvertFrom-Json
+          $backend = $registry.backends.'${{ matrix.backend }}'
+          New-Item -ItemType Directory -Force ./src/backends | Out-Null
+          git clone --depth 1 --branch $backend.branch $backend.repository ./src/backends/${{ matrix.backend }}
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/backends/${{ matrix.backend }} -> target
+      - name: Test backend workspace
+        shell: pwsh
+        working-directory: src/backends/${{ matrix.backend }}
+        run: cargo test --workspace
+      - name: Build backend binary
+        shell: pwsh
+        working-directory: src/backends/${{ matrix.backend }}
+        run: |
+          $registry = Get-Content ../../../backends.json -Raw | ConvertFrom-Json
+          $backend = $registry.backends.'${{ matrix.backend }}'
+          cargo build --release -p $backend.package
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path 'target/release' $backend.binary
+          if (-not (Test-Path $binary)) { throw "Expected binary not found: $binary" }

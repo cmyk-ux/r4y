@@ -1,114 +1,120 @@
 # R4Y — Recompile4You
 
-A compatibility layer that runs **Grand Theft Auto VI (Xbox Series X|S)** natively on Windows, using files **from your own copy of the game**, already readable on disk.
+R4Y is a Windows launcher, backend manager, and contributor-friendly integration layer for running Xbox Series X|S game builds from files the user already owns and can read on disk.
 
-R4Y brings together four open-source workstreams (see [docs/INTEGRACAO.md](docs/INTEGRACAO.md) for details):
+R4Y does not distribute game files, keys, executables, shaders, or other copyrighted game assets. It does not decrypt files or bypass platform protection. Users must provide their own legally obtained game files.
 
-| Source | What it brings to R4Y |
-|---|---|
-| [Marvisak/VIctory](https://github.com/Marvisak/VIctory) | Core: loader, runtime services, D3D12 backend, and shader recompiler (RDNA2 → DXIL). **This is what `r4y.cmd` builds.** |
-| [cmyk-ux/Leonida](https://github.com/cmyk-ux/Leonida) | The one-click installer model and hardware pre-check. rip. |
+> **Project status:** experimental. Compatibility, stability, and performance depend on the selected backend and the user's hardware. A successful build does not mean a game is fully playable.
 
-> [!IMPORTANT]
-> This repository **does not contain the game, keys, executables, or assets**, nor does it explain how to obtain them. You need your own copy, with its files already readable on disk. Nothing here decrypts or bypasses any protection. Grand Theft Auto and related names are trademarks of their respective owners; this project is not affiliated with Rockstar Games or Take-Two.
+## Backends
 
-## Status
+R4Y can build and launch three independent engines. The registry lives in [`backends.json`](backends.json), so source URLs, branches, Cargo package names, and executable names are not duplicated throughout the installer.
 
-**Not yet playable.** Progress depends on the selected core, according to the source repositories' READMEs as of 2026-11-24:
+| Backend | Source | Role |
+|---|---|---|
+| `minevictory` (default) | [cmyk-ux/minevictory](https://github.com/cmyk-ux/minevictory) | R4Y's working VIctory-derived runtime. |
+| `upstream` | [Marvisak/VIctory](https://github.com/Marvisak/VIctory) | Upstream baseline and compatibility reference. |
+| `xcl` | [cmyk-ux/minexcl](https://github.com/cmyk-ux/minexcl) | Independent XCL-derived runtime and diagnostic/tooling path. |
 
-- `upstream` (VIctory): Boot, menus at 30 FPS, and world loading work; world rendering still fails or is extremely slow.
-- `fork` (victory-gta6): The opening and first playable section render at 2–4 FPS; shadowed areas appear black (ray tracing is not yet working).
+Each backend is cloned, patched, built, configured, and launched in its own directory. R4Y does not combine backend source trees into a single Cargo workspace. This keeps engine-specific dependencies, build settings, state, and logs isolated.
 
-R4Y itself does not improve these performance figures.
+## Quick start
 
-## Requirements
+1. Install Git, Rustup, and Visual Studio 2022 Build Tools with the C++ workload and a Windows SDK. The installer can offer to install missing prerequisites through `winget`.
+2. Clone this repository:
 
-- Windows 10/11 x64, CPU with AVX2 support.
-- Direct3D 12 GPU with Shader Model 6.6 (and mesh shaders for the world).
-- Several GiB of free commit available at startup (Task Manager → Performance → Memory → **Committed**). If `crashes.log` mentions error 1455, close other programs or increase the paging file.
-- `r4y.cmd` installs any missing dependencies, with your confirmation, through `winget`: Git, Rustup, and Visual Studio 2022 Build Tools (C++ and Windows SDK).
-- Recommended: DXC 1.8 or newer (DXC 1.7 generates significantly larger DXIL and may take a very long time to compile pipelines on NVIDIA GPUs).
+   ```powershell
+   git clone https://github.com/cmyk-ux/r4y.git
+   cd r4y
+   ```
 
-## Easy Build (One Click)
+3. Run `r4y.cmd`, or choose a backend explicitly:
 
-1. `git clone https://github.com/cmyk-ux/r4y` (use `git clone`: `.gitattributes` converts the `.cmd` file to CRLF; downloading the ZIP may result in incorrect line endings).
-2. Double-click **`r4y.cmd`**.
+   ```cmd
+   r4y.cmd --backend minevictory
+   r4y.cmd --backend xcl
+   r4y.cmd --backend upstream
+   ```
 
-The script performs the following steps, in order:
+4. Select the folder containing your game files and the game's executable. R4Y remembers the selection locally.
+5. When the build and inspection checks finish, launch with `r4y-run.cmd`.
 
-1. Checks Windows, AVX2, GPU, and commit memory.
-2. Lists missing dependencies and installs them with your consent.
-3. Downloads/updates the core into `src\r4y-core` and applies the patches from `patches\`.
-4. **Asks for the game folder and executable** you want to run (you can type the path or use the file picker; your last selection is remembered).
-5. Saves the configuration outside the core repository (`config\r4y.toml`) and builds in release mode.
-6. Copies the binary to `bin\r4y.exe` and validates the configuration and selected executable.
-7. Creates `r4y-run.cmd` and asks whether you want to launch the game immediately.
+The first Rust build downloads dependencies and can take a while. Subsequent builds use the backend's isolated Cargo target directory and can reuse incremental artifacts.
 
-Running it again updates the core and performs an incremental rebuild.
-
-### Options
+## Installer options
 
 ```text
-r4y.cmd [--dry-run] [--no-build] [--no-run] [--yes] [--test] [--channel upstream|fork]
+r4y.cmd [--backend upstream|minevictory|xcl]
+        [--dry-run] [--no-build] [--no-run] [--yes] [--test]
 
-  --dry-run   only shows what's missing; makes no changes
-  --no-build  prepares everything and saves the configuration, but does not build
-  --no-run    builds and validates, but does not ask whether to launch
-  --yes       skips installation confirmation prompts
-  --test      also runs cargo test --workspace (does not use game data)
-  --channel   upstream (default) or fork
+  --backend NAME  Select the engine (default: minevictory)
+  --dry-run       Check prerequisites without installing, cloning, or writing files
+  --no-build      Save local selection/configuration but skip compilation
+  --no-run        Build and validate without offering to launch the game
+  --yes           Accept dependency installation prompts
+  --test          Run cargo test --workspace before building
+  --help          Show the available options
 ```
 
-When switching channels, `src\r4y-core` is reset to the new repository. Do not store your own changes there.
+The legacy `--channel upstream` and `--channel fork` arguments remain accepted; `fork` maps to `minevictory`.
 
-## Manual Build
+## Directory layout
 
-```powershell
-git clone --depth 1 https://github.com/Marvisak/VIctory src\r4y-core
-mkdir config
-copy src\r4y-core\victory.example.toml config\r4y.toml    # edit game_dir (outside src\)
-$env:VICTORY_CONFIG = "$PWD\config\r4y.toml"
-cd src\r4y-core
-cargo build --release -p victory
-target\release\victory.exe config
-target\release\victory.exe run "D:\YourGame\executable.exe" --execute
+```text
+r4y.cmd                  Windows entry point
+r4y-run.cmd              Portable launcher wrapper
+backends.json            Backend registry (single source of truth)
+scripts/r4y.ps1          Installer, updater, builder, validator, and launcher
+patches/<backend>/       Backend-specific patches, applied in filename order
+docs/INTEGRACAO.md       Backend architecture and integration notes
+CONTRIBUTING.md          Contributor workflow and testing
+
+src/backends/<backend>/  Local backend source checkouts (generated)
+build/<backend>/         Isolated Cargo target directories (generated)
+bin/backends/<backend>/  Built backend executables (generated)
+config/                  Per-machine selection and backend configs (generated)
 ```
 
-## After Installation
+Generated source checkouts, binaries, build outputs, personal configuration, and logs are not committed. User data and game files remain outside the source repositories. Backend data is stored under `%LOCALAPPDATA%\\R4Y\\backends\\<backend>`.
 
-Use `r4y-run.cmd`. To select another game/executable, run `r4y.cmd` again. The game folder is never modified; save files and `crashes.log` are stored in `%LOCALAPPDATA%\victory\data`.
+## Diagnostics and environment
 
-Environment variables translated by `r4y-run.cmd`:
+The launcher keeps the existing R4Y environment interface for VIctory-derived engines:
 
-`R4Y_LOG`, `R4Y_D3D12_DEBUG`, `R4Y_D3D12_WARP` → `VICTORY_LOG`, `VICTORY_D3D12_DEBUG`, `VICTORY_D3D12_WARP`.
+| R4Y variable | Backend variable |
+|---|---|
+| `R4Y_LOG` | `VICTORY_LOG` |
+| `R4Y_D3D12_DEBUG` | `VICTORY_D3D12_DEBUG` |
+| `R4Y_D3D12_DRED` | `VICTORY_D3D12_DRED` |
+| `R4Y_D3D12_WARP` | `VICTORY_D3D12_WARP` |
 
-Safe mode that avoids GPU driver resets:
+For example, in Command Prompt:
 
 ```cmd
 set R4Y_D3D12_WARP=1
+r4y-run.cmd
 ```
 
-This renders through the software adapter and is therefore slow.
+WARP uses a software adapter and is intended for troubleshooting, not performance. Backend-specific diagnostic options still depend on that backend's build features.
 
-> **Warning.** Entering the game world on a physical GPU may cause the GPU to hang, forcing Windows to restart the graphics driver (your monitors will briefly go black).
+XCL stores its title data beneath `%LOCALAPPDATA%\\R4Y\\backends\\xcl` through `XCL_DATA_ROOT`. VIctory-derived engines receive separate `cache_dir` and `data_dir` values in their generated TOML configuration.
 
-## Project Structure
+## For contributors
 
-```text
-r4y.cmd             one-click installer/updater/builder
-patches/            patches applied to the core (*.patch, in order)
-docs/INTEGRACAO.md  how the source projects are integrated and what was reused
-NOTICE.md           credits and licenses
-```
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request. The short version:
 
-`src\`, `bin\`, `build\`, `config\`, and logs are generated locally and are excluded from git.
+- Keep backend-specific logic in the backend adapter/registry rather than adding scattered repository URLs to the installer.
+- Do not modify files inside a downloaded backend checkout as part of an R4Y change. Use a patch under `patches/<backend>/` when a repeatable integration patch is required.
+- Keep build outputs, local paths, game data, logs, and generated configuration out of commits.
+- Validate installer metadata with `powershell -ExecutionPolicy Bypass -File scripts/r4y.ps1 --validate-only`.
+- Test the affected backend on Windows and include the backend revision, build command, and test results in the pull request.
 
-## Current Version Limitations
+Issues and pull requests are welcome. Bug reports should identify the backend, Windows version, GPU/driver, backend commit, exact command, and relevant R4Y/backend logs. Never attach game files or copyrighted assets.
 
-- The R4Y name is used throughout the installer, binary (`r4y.exe`), launchers, and documentation. Internal identifiers in the core code (`victory_*` crates, `VICTORY_*` variables) remain unchanged because the code is downloaded from upstream during the build.
-- `r4y.cmd` was written without being executed on Windows. Please test it and report any issues.
-- The Leonida asset pipeline (Python/Vulkan, approximately 400 GB) is not integrated into the installer.
+## Credits
+
+R4Y builds on the work of the VIctory, XCL, and Leonida projects. See [`NOTICE.md`](NOTICE.md) for source links and attribution.
 
 ## License
 
-GPL-3.0-or-later. See `LICENSE` and [NOTICE.md](NOTICE.md).
+See [`LICENSE`](LICENSE) and [`NOTICE.md`](NOTICE.md). Each backend remains a separately built project with its own source repository and notices.

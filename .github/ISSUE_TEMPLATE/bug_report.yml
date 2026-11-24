@@ -1,0 +1,49 @@
+name: Bug report
+description: Report an installer, launcher, or backend integration problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - minevictory
+        - upstream
+        - xcl
+        - Installer / launcher (backend-independent)
+    validations:
+      required: true
+  - type: input
+    id: r4y_revision
+    attributes:
+      label: R4Y commit or version
+      placeholder: "git rev-parse --short HEAD"
+    validations:
+      required: true
+  - type: input
+    id: backend_revision
+    attributes:
+      label: Backend commit
+      placeholder: "git -C src/backends/<backend> rev-parse --short HEAD"
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows version, CPU, GPU, driver version, and relevant toolchain versions.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the exact R4Y command and what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Remove personal paths and machine details. Do not attach game files, assets, keys, or dumps.
+    validations:
+      required: false

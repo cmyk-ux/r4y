@@ -1,12 +1,29 @@
-# Gerado na sua maquina pelo r4y.cmd
-src/
-bin/
-build/
-config/
-r4y-run.cmd
+# Local backend source checkouts and build outputs
+/src/
+/bin/
+/build/
+
+# Per-machine configuration and generated launchers
+/config/*
+!/config/README.md
+/r4y.log
+
+# Local logs, dumps and generated artifacts
 *.log
-# Nunca versionar dados do jogo
+*.dmp
+*.etl
+*.pdb
+
+# Never commit game data
 *.rpf
 *.xvc
 *.msixvc
 *.ttpf
+*.xpak
+
+# Editor / OS files
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

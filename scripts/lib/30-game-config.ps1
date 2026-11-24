@@ -1,0 +1,98 @@
+function Pick-Folder([string]$Description) {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dialog.Description = $Description
+        if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { return $dialog.SelectedPath }
+    } catch { Write-Warn 'Folder picker unavailable; enter the path manually.' }
+    return $null
+}
+
+function Pick-File([string]$InitialDirectory) {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        $dialog = New-Object System.Windows.Forms.OpenFileDialog
+        $dialog.Filter = 'Game executable (*.exe)|*.exe|All files (*.*)|*.*'
+        if ($InitialDirectory -and (Test-Path -LiteralPath $InitialDirectory)) { $dialog.InitialDirectory = $InitialDirectory }
+        if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { return $dialog.FileName }
+    } catch { Write-Warn 'File picker unavailable; enter the path manually.' }
+    return $null
+}
+
+function Select-Game {
+    $state = Load-State
+    if ($state -and $state.game_dir -and $state.exe -and
+        (Test-Path -LiteralPath $state.game_dir -PathType Container) -and
+        (Test-Path -LiteralPath $state.exe -PathType Leaf)) {
+        Write-Host ''
+        Write-Host ('Last selected executable: ' + $state.exe) -ForegroundColor White
+        if ([Console]::IsInputRedirected) { return @($state.game_dir, $state.exe) }
+        $answer = Read-Host 'Reuse this selection? [Y/n]'
+        if (-not $answer -or $answer -match '^(?i:y|yes|s|sim)$') { return @($state.game_dir, $state.exe) }
+    }
+    if ([Console]::IsInputRedirected) { throw 'No game is configured and this session is non-interactive. Run r4y.cmd in a normal console.' }
+
+    Write-Host ''
+    Write-Host 'Select the folder containing your own game files, already readable on disk.' -ForegroundColor White
+    $typed = Read-Host 'Enter a folder path, or press ENTER to open the folder picker'
+    if ($typed) { $gameDir = $typed.Trim().Trim('"') } else { $gameDir = Pick-Folder 'Select the game folder' }
+    if (-not $gameDir -or -not (Test-Path -LiteralPath $gameDir -PathType Container)) { throw 'No valid game folder was selected.' }
+    $gameDir = (Resolve-Path -LiteralPath $gameDir).ProviderPath
+
+    $found = @()
+    $found += @(Get-ChildItem -LiteralPath $gameDir -Filter '*.exe' -File -ErrorAction SilentlyContinue)
+    foreach ($directory in @(Get-ChildItem -LiteralPath $gameDir -Directory -ErrorAction SilentlyContinue)) {
+        $found += @(Get-ChildItem -LiteralPath $directory.FullName -Filter '*.exe' -File -ErrorAction SilentlyContinue)
+    }
+    if ($found.Count -eq 1) {
+        $executable = $found[0].FullName
+        Write-Info ('Found executable: ' + $executable)
+    } elseif ($found.Count -gt 1) {
+        Write-Host 'Executables found:' -ForegroundColor White
+        for ($index = 0; $index -lt $found.Count; $index++) {
+            Write-Host ('  [' + ($index + 1) + '] ' + $found[$index].FullName.Substring($gameDir.Length).TrimStart('\'))
+        }
+        $selection = Read-Host 'Enter the executable number, or press ENTER to browse'
+        if ($selection -match '^\d+$' -and [int]$selection -ge 1 -and [int]$selection -le $found.Count) { $executable = $found[[int]$selection - 1].FullName }
+        else { $executable = Pick-File $gameDir }
+    } else {
+        $executable = Pick-File $gameDir
+    }
+    if (-not $executable -or -not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'No valid game executable was selected.' }
+    Save-State $script:Options.Backend $gameDir $executable
+    return @($gameDir, $executable)
+}
+
+function ConvertTo-TomlString([string]$Value) {
+    $escaped = $Value.Replace('\', '\\').Replace('"', '\"').Replace("`r", '\r').Replace("`n", '\n')
+    return '"' + $escaped + '"'
+}
+
+function Write-BackendConfig([string]$GameDir) {
+    $paths = Get-BackendPaths $script:Options.Backend
+    if ((Get-Backend).engine -ne 'victory') { return }
+    New-Item -ItemType Directory -Force -Path $script:ConfigRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $paths.Cache, $paths.Data | Out-Null
+    # One-time, non-destructive migration of existing VIctory persistent data.
+    $legacyData = Join-Path $env:LOCALAPPDATA 'victory\data'
+    if ($script:Options.Backend -eq 'minevictory' -and (Test-Path -LiteralPath $legacyData -PathType Container)) {
+        $existing = @(Get-ChildItem -LiteralPath $paths.Data -Force -ErrorAction SilentlyContinue)
+        if ($existing.Count -eq 0) {
+            if (Confirm-Action 'Copy existing VIctory saved data into the new MineVIctory data directory?') {
+                Get-ChildItem -LiteralPath $legacyData -Force | Copy-Item -Destination $paths.Data -Recurse -Force
+                Write-Ok 'Existing persistent data copied; the original directory was left untouched.'
+            }
+        }
+    }
+    $lines = @(
+        '# Generated by R4Y. Edit this file only if you know the backend config format.',
+        '[paths]',
+        ('game_dir = ' + (ConvertTo-TomlString $GameDir)),
+        ('cache_dir = ' + (ConvertTo-TomlString $paths.Cache)),
+        ('data_dir = ' + (ConvertTo-TomlString $paths.Data)),
+        'test_titles = []'
+    )
+    [IO.File]::WriteAllLines($paths.Config, $lines, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Ok ('Backend config: ' + $paths.Config)
+}
+
