@@ -22,6 +22,8 @@
       "name": "R4Y / Minexcl",
       "repository": "https://github.com/cmyk-ux/minexcl.git",
       "branch": "main",
+      "ci_repository": "https://github.com/xcl-dev/xcl.git",
+      "ci_branch": "main",
       "package": "xcl",
       "binary": "xcl.exe",
       "engine": "xcl"

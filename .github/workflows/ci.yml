@@ -31,13 +31,18 @@ jobs:
         uses: actions/checkout@v4
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Clone selected backend
+      - name: Clone backend source
         shell: pwsh
         run: |
           $registry = Get-Content ./backends.json -Raw | ConvertFrom-Json
           $backend = $registry.backends.'${{ matrix.backend }}'
+          $repository = if ($backend.ci_repository) { $backend.ci_repository } else { $backend.repository }
+          $branch = if ($backend.ci_branch) { $backend.ci_branch } else { $backend.branch }
+          if ($repository -ne $backend.repository) {
+            Write-Host "CI uses the public upstream baseline for ${{ matrix.backend }}; the installer continues to use the repository configured in backends.json."
+          }
           New-Item -ItemType Directory -Force ./src/backends | Out-Null
-          git clone --depth 1 --branch $backend.branch $backend.repository ./src/backends/${{ matrix.backend }}
+          git clone --depth 1 --branch $branch $repository ./src/backends/${{ matrix.backend }}
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
