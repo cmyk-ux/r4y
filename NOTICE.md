@@ -1,18 +1,18 @@
 # NOTICE
 
-R4Y (Recompile4You) e distribuido sob GPL-3.0-or-later (veja LICENSE).
+R4Y (Recompile4You) is distributed under GPL-3.0-or-later. See [LICENSE](LICENSE).
 
-## Fontes e creditos
+## Source projects and attribution
 
-- **VIctory**, de Marvisak e colaboradores (GPL-3.0-or-later): nucleo que o `r4y.cmd` baixa e compila. Nenhum codigo do VIctory esta copiado neste repositorio.
-- **victory-gta6**, de fxceless (GPL-3.0-or-later, fork do VIctory): canal opcional `fork`.
-- **Leonida**, de cmyk-ux / "dysu" (GPL-3.0-or-later), sobre o projeto Leonida de ItsNotRexed e colaboradores: o `r4y.cmd` reaproveita a estrutura do instalador `Leonida_Quick-Install_Update.cmd` (cabecalho em batch que extrai e executa um payload PowerShell embutido).
-- **XCL**, de ivall / xcl-dev e colaboradores (**GPL-2.0-only**): usado apenas como referencia de comportamento e de diagnostico. **Nenhum codigo do XCL foi copiado**: GPL-2.0-only nao e compativel com GPL-3.0-or-later e nao pode ser misturado a estes codigos.
+- **VIctory** — Marvisak and contributors: the upstream Rust runtime, loader, HLE, D3D12 backend, shader translator, formats, tools and tests incorporated as the initial R4Y workspace base.
+- **MineVIctory / victory-fork** — cmyk-ux, fxceless and contributors: the VIctory-derived fork used as the source of selected GPU, shader and performance fixes. R4Y ports are rebased and tested individually; the fork is not merged wholesale.
+- **XCL** — ivall / xcl-dev and contributors: independent Xbox Series compatibility runtime. R4Y references its public issue/PR research and selected algorithms; it does not include the XCL runtime as a second backend.
+- **Leonida** — ItsNotRexed, cmyk-ux and contributors: source of the simple Windows installer/bootstrap pattern. The separate Leonida asset pipeline is not included in R4Y.
 
-Ao redistribuir qualquer um desses projetos, mantenha seus avisos de copyright e suas licencas.
+Preserve the original source notices and project history when working on files derived from these projects. See [docs/SOURCE_MAP.md](docs/SOURCE_MAP.md) for the provenance and current integration decisions.
 
-## Sem dados do jogo
+## No game data
 
-Este repositorio nao contem o jogo, chaves, executaveis, shaders gerados nem assets, e nao descriptografa nem contorna protecao alguma. Nao anexe arquivos do jogo a issues ou pull requests.
+This repository does not distribute game files, keys, executables, generated shaders, saves or other copyrighted game assets. It does not decrypt files or bypass platform protection. Do not attach game data to issues or pull requests.
 
-Grand Theft Auto e nomes relacionados sao marcas de seus donos. R4Y nao e afiliado a Rockstar Games nem a Take-Two Interactive.
+Grand Theft Auto and related names are trademarks of their respective owners. R4Y is not affiliated with Rockstar Games or Take-Two Interactive.

@@ -1,0 +1,54 @@
+name: Bug report
+description: Report an R4Y installer, runtime, GPU or shader problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Affected subsystem
+      options:
+        - Installer / CLI
+        - PE loader
+        - HLE / console services
+        - D3D12 GPU backend
+        - Shader translator
+        - Cache / pipeline
+        - Unknown
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: R4Y commit
+      placeholder: "git rev-parse --short HEAD"
+    validations:
+      required: true
+  - type: textarea
+    id: system
+    attributes:
+      label: System and runtime
+      description: Include Windows build, CPU, actual D3D12 adapter, GPU driver, game build, and how long the test ran.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the exact R4Y command and expected/actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Diagnostic evidence
+      description: Include relevant R4Y logs, D3D12 debug-layer messages, DRED breadcrumbs, or shader validator results. Remove personal paths.
+    validations:
+      required: false
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safe reporting
+      options:
+        - label: I have not attached game files, keys, assets, shader dumps, save data, or copyrighted dumps.
+          required: true
