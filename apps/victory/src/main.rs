@@ -258,11 +258,11 @@ fn install_legacy_environment_aliases() {
         ("R4Y_REF_VS", "VICTORY_REF_VS"),
     ];
     for &(public, legacy) in ALIASES {
-        if std::env::var_os(legacy).is_none() {
-            if let Some(value) = std::env::var_os(public) {
-                // SAFETY: aliases are installed on the main thread before the runtime starts any workers.
-                unsafe { std::env::set_var(legacy, value) };
-            }
+        if std::env::var_os(legacy).is_none()
+            && let Some(value) = std::env::var_os(public)
+        {
+            // SAFETY: aliases are installed on the main thread before the runtime starts any workers.
+            unsafe { std::env::set_var(legacy, value) };
         }
     }
 }
