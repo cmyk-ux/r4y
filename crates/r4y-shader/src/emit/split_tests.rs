@@ -68,6 +68,24 @@ const SAVEEXEC_SCC: &[u32] = &[
     0x7E04_0209, // v_mov_b32 v2, s9
 ];
 
+const CONSOLE_LOOP: &[u32] = &[
+    0xBE89_0380, // s_mov_b32 s9, 0
+    0x7E04_0280, // v_mov_b32 v2, 0
+    0x7D8A_0080, // v_cmp_ne_u32 vcc, 0, v0
+    0xBE8A_246A, // s_and_saveexec_b64 s[10:11], vcc
+    0xBF88_0006, // s_cbranch_execz end
+    // loop: each lane t runs t iterations and reads lane 40 each time
+    0xD760_0009,
+    0x0001_5100, // v_readlane_b32 s9, v0, 40
+    0x4A04_0481, // v_add_nc_u32 v2, 1, v2
+    0x7D82_0102, // v_cmp_lt_u32 vcc, v2, v0
+    0x87FE_6A7E, // s_and_b64 exec, exec, vcc
+    0xBF89_FFFA, // s_cbranch_execnz loop
+    // end:
+    0x88FE_0A7E, // s_or_b64 exec, exec, s[10:11]
+    0x4A04_0409, // v_add_nc_u32 v2, s9, v2
+];
+
 fn target(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device) -> Option<Target> {
     let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
     // SAFETY: D3D12 fills the correctly sized OPTIONS1 structure.
@@ -268,5 +286,16 @@ fn wave64_split_matches_console_on_d3d12_hardware() {
         let out = run(&host, target, &native, 2)
             .unwrap_or_else(|error| panic!("saveexec SCC branch: {error}"));
         assert_eq!(out, vec![42; 128], "SCC must test the new EXEC mask");
+
+        let native = program(CONSOLE_LOOP, 64);
+        let out = run(&host, target, &native, 2)
+            .unwrap_or_else(|error| panic!("cross-half readlane in divergent loop: {error}"));
+        let want: Vec<u32> = (0..2)
+            .flat_map(|_| (0..64).map(|lane| lane + 40))
+            .collect();
+        assert_eq!(
+            out, want,
+            "each lane must finish its own iteration count while the full console wave reads lane 40"
+        );
     }
 }
