@@ -184,6 +184,8 @@ mod memory_tests;
 mod sampler;
 #[cfg(all(test, windows))]
 mod semantics_tests;
+#[cfg(all(test, windows))]
+mod split_tests;
 mod shader;
 #[cfg(all(test, windows))]
 mod stride_tests;
