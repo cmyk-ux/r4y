@@ -857,10 +857,12 @@ This is observation only: it does not change emitted DXIL, pipeline compatibilit
 
 The existing timing mode already isolates per-command-list GPU time; no second timing subsystem is needed:
 - `R4Y_GPU_TIMING=1` makes `Host::execute` submit and fence each list separately.
-- Lists taking more than 50 ms log `slow host list` and up to six `slow list command` entries with GPU timestamp durations.
-- Without this flag, all lists are submitted as one group; the observed `slow host submission ms=5572 lists=9` cannot identify which list or command caused the delay.
+- Lists taking more than 50 ms log `slow host list`.
+- **Per-command GPU timestamp rows additionally require `R4Y_D3D12_DRED=1`.** `HostList::note()` records the command marker and the timestamp immediately before it only when `dred_on()` is true; that condition is controlled by `R4Y_D3D12_DRED`. Without it, list-level timing still runs, but `notes` is empty and `slow list command` has no command samples to report.
+- With DRED on, R4Y also enables D3D12 auto-breadcrumb and page-fault reporting and labels host objects. This is independent of GPU-Based Validation; it does not turn GBV on.
+- Without `R4Y_GPU_TIMING`, all lists are submitted as one group; the observed `slow host submission ms=5572 lists=9` cannot identify which list or command caused the delay.
 
-The previous correct Diagnostics runtime explicitly reported `GPU-based validation on`. That is controlled independently by `R4Y_D3D12_GBV`; it is enabled only when that environment variable is present. For the next performance/queue attribution run, remove GBV while retaining the normal default console-flow mode. Do **not** combine this first run with `R4Y_WAVE64_CONSOLE_FLOW=0`, because that would change which shaders are accepted and confound the timing comparison.
+The previous correct Diagnostics runtime explicitly reported `GPU-based validation on`. That is controlled independently by `R4Y_D3D12_GBV`; remove it for this run. Enable DRED specifically so the per-command timestamps and breadcrumbs are recorded, while retaining the normal default console-flow mode. Do **not** combine this first run with `R4Y_WAVE64_CONSOLE_FLOW=0`, because that would change which shaders are accepted and confound the timing comparison.
 
 PowerShell for the next single run:
 
@@ -868,7 +870,8 @@ PowerShell for the next single run:
 Remove-Item Env:R4Y_D3D12_GBV -ErrorAction SilentlyContinue
 Remove-Item Env:R4Y_WAVE64_CONSOLE_FLOW -ErrorAction SilentlyContinue
 $env:R4Y_GPU_TIMING = "1"
-.4y-run.cmd
+$env:R4Y_D3D12_DRED = "1"
+.\r4y-run.cmd
 ```
 
 Keep the user's existing Diagnostics profile selection. Do not rebuild release if the installer selects diagnostics; use the installed profile's build path from sections 7–10.
@@ -888,3 +891,31 @@ Interpretation:
 ### No new production behavior change
 
 The last code change only adds the two diagnostic fields to shader translation logs. The scratch indirect clamp and dynamic heap stride fixes remain unchanged and validated by CI. Do not start clamp hoisting or broad helper-lane changes before the next title run identifies the actual GPU bottleneck.
+
+
+## 15. Follow-up CI and per-command timing requirement (2026-11-25)
+
+### Exact current-head CI
+
+- PR head: `b351848d2026ab9ecd6290faf08512829eb8c254`.
+- CI run #189: https://github.com/cmyk-ux/r4y/actions/runs/45619202994 — **success on the exact PR head**.
+- All steps passed: installer preflight, MSVC initialization, PowerShell native stderr test, normal Clippy, all-features/diagnostics Clippy, release build, workspace tests, and the dedicated D3D12 test process.
+- Workspace: `214 passed; 0 failed; 2 ignored; 2 filtered out`.
+- The dedicated D3D12 step explicitly printed `adapter supports neither 32- nor 64-lane waves; skipped`. It is not physical RTX 3070 validation.
+- PR #16 is open and mergeable; branch compare is 171 commits ahead of `main`, 0 behind.
+
+### Correction to the next Diagnostics command
+
+The prior section's command omitted `R4Y_D3D12_DRED=1`. Source inspection of `crates/r4y-gpu/src/host.rs` showed that `HostList::note()` records per-command `EndQuery(TIMESTAMP)` and marker text only inside `if dred_on()`; `dred_on()` requires `R4Y_D3D12_DRED` in a Diagnostics build. Therefore `R4Y_GPU_TIMING=1` alone isolates and times whole command lists but cannot populate the individual `slow list command` durations.
+
+The corrected single-run command is:
+
+```powershell
+Remove-Item Env:R4Y_D3D12_GBV -ErrorAction SilentlyContinue
+Remove-Item Env:R4Y_WAVE64_CONSOLE_FLOW -ErrorAction SilentlyContinue
+$env:R4Y_GPU_TIMING = "1"
+$env:R4Y_D3D12_DRED = "1"
+.\r4y-run.cmd
+```
+
+DRED enables auto-breadcrumb/page-fault reporting and command markers; it is independent of GBV. Keep console-flow at its default for this first attribution run.
