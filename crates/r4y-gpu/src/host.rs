@@ -1079,9 +1079,13 @@ impl Host {
                     } else if let Some(r) = run {
                         let pipelines = r.pipelines.lock().unwrap_or_else(|e| e.into_inner());
                         text.push_str(&format!(", its pipelines {pipelines:?}"));
-                    } else if let Some(r) = prelude {
-                        let notes = r.prelude_notes.lock().unwrap_or_else(|e| e.into_inner());
-                        text.push_str(&format!(", prelude operations {notes:?}"));
+                    }
+                    #[cfg(feature = "diagnostics")]
+                    if done == 0 {
+                        if let Some(r) = prelude {
+                            let notes = r.prelude_notes.lock().unwrap_or_else(|e| e.into_inner());
+                            text.push_str(&format!(", prelude operations {notes:?}"));
+                        }
                     }
                 }
                 plain = p.pNext;
