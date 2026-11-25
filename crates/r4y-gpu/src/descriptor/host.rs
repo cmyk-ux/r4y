@@ -1475,7 +1475,7 @@ mod tests {
 
     #[test]
     fn transient_slots_stop_before_the_final_three_null_descriptors() {
-        assert_eq!(fit_dynamic_slots(1_900_000, DYNAMIC, r4y_shader::emit::HEAP_VIEWS), Some(DYNAMIC));
+        assert_eq!(fit_dynamic_slots(1_900_000, DYNAMIC, r4y_shader::emit::HEAP_VIEWS), Some(r4y_shader::emit::HEAP_VIEWS - 3 - 1_900_000));
         assert_eq!(
             fit_dynamic_slots(
                 r4y_shader::emit::HEAP_VIEWS - DYNAMIC,
