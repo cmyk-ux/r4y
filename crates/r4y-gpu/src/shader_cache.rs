@@ -460,11 +460,11 @@ mod tests {
         assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 20, views, views, 0));
         assert_ne!(
             k,
-            key("0123456789abcdef", b"encoding", 1 << 20, r4y_shader::emit::HEAP_VIEWS_PORTABLE, 721_469)
+            key("0123456789abcdef", b"encoding", 1 << 20, r4y_shader::emit::HEAP_VIEWS_PORTABLE, 721_469, group_sync)
         );
         assert_ne!(
             k,
-            key("0123456789abcdef", b"encoding", 1 << 20, r4y_shader::emit::HEAP_VIEWS_PORTABLE, 721_468)
+            key("0123456789abcdef", b"encoding", 1 << 20, r4y_shader::emit::HEAP_VIEWS_PORTABLE, 721_468, group_sync)
         );
         assert_eq!(
             *build(),
