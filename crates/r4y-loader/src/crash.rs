@@ -17,8 +17,9 @@ use windows_sys::Win32::Foundation::{
 };
 
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    AddVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS, M128A, RtlLookupFunctionEntry,
-    RtlVirtualUnwind, SetUnhandledExceptionFilter, UNW_FLAG_NHANDLER,
+    AddVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS, IMAGE_RUNTIME_FUNCTION_ENTRY,
+    M128A, RtlLookupFunctionEntry, RtlVirtualUnwind, SetUnhandledExceptionFilter,
+    UNW_FLAG_NHANDLER,
 };
 use windows_sys::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -452,7 +453,21 @@ unsafe fn report(what: &str, info: *const EXCEPTION_POINTERS, to_file: bool) {
             1 => "write",
             _ => "execute",
         };
-        format!(" ({kind} {:#x}: {})", p[1], memory_at(p[1]))
+        // An access violation is raised after the CPU has fetched the
+        // faulting instruction. If it belongs to a loaded image, preserve
+        // its bytes so the crash can be disassembled without the title PDB.
+        let instruction = if module_of(at).is_some() {
+            // SAFETY: the exception address is the instruction the CPU was
+            // executing; its page was necessarily readable/executable.
+            unsafe { instruction_bytes(at) }
+        } else {
+            "unavailable (not in a loaded image)".into()
+        };
+        format!(
+            " ({kind} {:#x}: {}; instruction bytes: {instruction})",
+            p[1],
+            memory_at(p[1])
+        )
     } else if code == CPP_EXCEPTION && record.NumberParameters >= 4 && p[0] == CPP_MAGIC {
         // SAFETY: a live MSVC throw.
         format!(" (C++ {} thrown)", unsafe { thrown(&p) })
@@ -498,7 +513,19 @@ unsafe fn report(what: &str, info: *const EXCEPTION_POINTERS, to_file: bool) {
         context.R15
     ));
     for (i, pc) in unwind(*context).into_iter().enumerate() {
-        line(format!("  #{i:<2} {}", locate(pc as usize)));
+        let at = pc as usize;
+        let function = function_range(at)
+            .map(|range| {
+                format!(
+                    " [function RVA {:#x}..{:#x}, +{:#x}; unwind RVA {:#x}]",
+                    range.begin,
+                    range.end,
+                    at as u64 - range.image_base - u64::from(range.begin),
+                    range.unwind,
+                )
+            })
+            .unwrap_or_default();
+        line(format!("  #{i:<2} {}{function}", locate(at)));
     }
     if to_file {
         let said = title_output();
@@ -579,6 +606,47 @@ pub(crate) fn unwind_into(context: CONTEXT, low: usize, high: usize, frames: &mu
         }
         frames.push(context.Rip);
     }
+}
+
+/// The x64 PE runtime-function record containing an instruction.
+#[derive(Clone, Copy)]
+struct FunctionRange {
+    image_base: u64,
+    begin: u32,
+    end: u32,
+    unwind: u32,
+}
+
+/// Looks up the function range used by Windows' own unwinder. These RVAs
+/// identify a useful disassembly boundary even when the title has no PDB.
+fn function_range(address: usize) -> Option<FunctionRange> {
+    let mut image = 0u64;
+    // SAFETY: the API only inspects the process's registered function tables.
+    let entry = unsafe { RtlLookupFunctionEntry(address as u64, &mut image, null_mut()) };
+    if entry.is_null() || image == 0 {
+        return None;
+    }
+    // SAFETY: RtlLookupFunctionEntry returned a live entry for this PC.
+    let (begin, end, unwind) = unsafe {
+        let entry: &IMAGE_RUNTIME_FUNCTION_ENTRY = &*entry;
+        (
+            entry.BeginAddress,
+            entry.EndAddress,
+            entry.Anonymous.UnwindInfoAddress,
+        )
+    };
+    if begin >= end {
+        return None;
+    }
+    let start = image.checked_add(u64::from(begin))?;
+    let finish = image.checked_add(u64::from(end))?;
+    let address = address as u64;
+    (start <= address && address < finish).then_some(FunctionRange {
+        image_base: image,
+        begin,
+        end,
+        unwind,
+    })
 }
 
 /// `module+rva`, or the bare address.
@@ -676,6 +744,17 @@ mod tests {
             .collect();
         let system: Vec<_> = walked[1..].iter().map(|&f| f as usize).collect();
         assert_eq!(ours, system);
+    }
+
+    #[test]
+    #[inline(never)]
+    fn locates_the_runtime_function_range_for_our_own_code() {
+        let address = locates_the_runtime_function_range_for_our_own_code as *const () as usize;
+        let range = function_range(address).expect("the test function has x64 unwind metadata");
+        let start = range.image_base + u64::from(range.begin);
+        let end = range.image_base + u64::from(range.end);
+        assert!(start <= address as u64 && (address as u64) < end);
+        assert!(range.begin < range.end);
     }
 
     #[test]
