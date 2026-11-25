@@ -869,10 +869,10 @@ impl State {
             // A directly-indexed sampler heap is mandatory when the root
             // signature carries SAMPLER_HEAP_DIRECTLY_INDEXED. Use a valid
             // default heap when the title has not bound its own.
-            if let Some(sampler_heap) = sampler_heap {
-                if !heaps.iter().flatten().any(|heap| heap.as_raw() == sampler_heap.as_raw()) {
-                    heaps.push(Some(sampler_heap));
-                }
+            if let Some(sampler_heap) = sampler_heap
+                && !heaps.iter().flatten().any(|heap| heap.as_raw() == sampler_heap.as_raw())
+            {
+                heaps.push(Some(sampler_heap));
             }
             heaps.iter().flatten().for_each(|h| list.keep(h));
             // SAFETY: an open list and shader-visible heaps.
