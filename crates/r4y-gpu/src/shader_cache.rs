@@ -83,12 +83,14 @@ fn build() -> &'static [u8; 32] {
         key_for_target(
             r4y_shader::SOURCE_HASH,
             ENCODING,
-            limit,
-            r4y_shader::emit::heap_views(),
-            r4y_shader::emit::title_views(),
-            group_sync,
-            wave64_console_flow,
-            crate::host::host().map_or(Target::NONE, |host| host.wave_target),
+            KeySettings {
+                limit,
+                views: r4y_shader::emit::heap_views(),
+                title: r4y_shader::emit::title_views(),
+                group_sync,
+                wave64_console_flow,
+                target: crate::host::host().map_or(Target::NONE, |host| host.wave_target),
+            },
         )
     })
 }
@@ -96,31 +98,43 @@ fn build() -> &'static [u8; 32] {
 /// This file, whose `encode` and `decode` define the entries.
 const ENCODING: &[u8] = include_bytes!("shader_cache.rs");
 
-#[cfg(test)]
-fn key(translator: &str, encoding: &[u8], limit: u32, views: u32, title: u32, group_sync: u8) -> [u8; 32] {
-    key_for_target(translator, encoding, limit, views, title, group_sync, true, Target::ANY)
-}
-
-/// Host wave capabilities are part of the cache identity: one translation
-/// may use native wave64, while another adapter needs a split-wave form.
-fn key_for_target(
-    translator: &str,
-    encoding: &[u8],
+#[derive(Clone, Copy)]
+struct KeySettings {
     limit: u32,
     views: u32,
     title: u32,
     group_sync: u8,
     wave64_console_flow: bool,
     target: Target,
-) -> [u8; 32] {
+}
+
+#[cfg(test)]
+fn key(translator: &str, encoding: &[u8], limit: u32, views: u32, title: u32, group_sync: u8) -> [u8; 32] {
+    key_for_target(
+        translator,
+        encoding,
+        KeySettings {
+            limit,
+            views,
+            title,
+            group_sync,
+            wave64_console_flow: true,
+            target: Target::ANY,
+        },
+    )
+}
+
+/// Host wave capabilities are part of the cache identity: one translation
+/// may use native wave64, while another adapter needs a split-wave form.
+fn key_for_target(translator: &str, encoding: &[u8], settings: KeySettings) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(translator.as_bytes());
     h.update(blake3::hash(encoding).as_bytes());
-    h.update(&limit.to_le_bytes());
-    h.update(&views.to_le_bytes());
-    h.update(&title.to_le_bytes());
-    h.update(&[group_sync, u8::from(wave64_console_flow)]);
-    h.update(&target.key());
+    h.update(&settings.limit.to_le_bytes());
+    h.update(&settings.views.to_le_bytes());
+    h.update(&settings.title.to_le_bytes());
+    h.update(&[settings.group_sync, u8::from(settings.wave64_console_flow)]);
+    h.update(&settings.target.key());
     *h.finalize().as_bytes()
 }
 
@@ -496,25 +510,39 @@ mod tests {
         );
         let nvidia = Target { lanes_min: 32, lanes_max: 32 };
         let rdna = Target { lanes_min: 32, lanes_max: 64 };
+        let settings = |target, wave64_console_flow| KeySettings {
+            limit: 1 << 20,
+            views,
+            title: views,
+            group_sync,
+            wave64_console_flow,
+            target,
+        };
         let by_target = |target| {
-            key_for_target("0123456789abcdef", b"encoding", 1 << 20, views, views, group_sync, true, target)
+            key_for_target("0123456789abcdef", b"encoding", settings(target, true))
         };
         assert_ne!(by_target(nvidia), by_target(rdna));
         assert_ne!(
             k,
-            key_for_target("0123456789abcdef", b"encoding", 1 << 20, views, views, group_sync, false, Target::ANY)
+            key_for_target(
+                "0123456789abcdef",
+                b"encoding",
+                settings(Target::ANY, false),
+            )
         );
         assert_eq!(
             *build(),
             key_for_target(
                 r4y_shader::SOURCE_HASH,
                 ENCODING,
-                r4y_shader::emit::loop_limit(),
-                r4y_shader::emit::heap_views(),
-                r4y_shader::emit::title_views(),
-                r4y_shader::emit::group_sync(),
-                r4y_shader::emit::wave64_console_flow(),
-                crate::host::host().map_or(Target::NONE, |host| host.wave_target),
+                KeySettings {
+                    limit: r4y_shader::emit::loop_limit(),
+                    views: r4y_shader::emit::heap_views(),
+                    title: r4y_shader::emit::title_views(),
+                    group_sync: r4y_shader::emit::group_sync(),
+                    wave64_console_flow: r4y_shader::emit::wave64_console_flow(),
+                    target: crate::host::host().map_or(Target::NONE, |host| host.wave_target),
+                },
             )
         );
         // The encoding part is this file as built.
