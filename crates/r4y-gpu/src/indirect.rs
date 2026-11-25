@@ -396,8 +396,11 @@ mod tests {
         let readback = readback.unwrap();
         let list = host.new_list().unwrap();
         list.keep(&readback);
+        // SAFETY: all three resources are live D3D12 buffers.
         let source_gpu = unsafe { source.GetGPUVirtualAddress() };
+        // SAFETY: the count buffer is live.
         let count_gpu = unsafe { count.GetGPUVirtualAddress() };
+        // SAFETY: the budget buffer is live.
         let budget_gpu = unsafe { budget.GetGPUVirtualAddress() };
         let source_to_read = crate::host::transition(
             &source,
