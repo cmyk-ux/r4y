@@ -297,23 +297,90 @@ CI after documentation changes:
 - Last observed status during this handoff update: Clippy normal and all-features passed; Release build was in progress. Re-check run #131 (and any newer main run) before reporting final status.
 - PR #16 feature head `444e2570f1af854a4d16e09308607fa5482c68f2`, run #129 passed: https://github.com/cmyk-ux/r4y/actions/runs/45569300257. Its D3D12 body had been skipped on hosted runner without Wave32/64; the user's RTX 3070 dispatch remains the next runtime validation.
 
+## 4.7 GPU-progress watchdog investigation and external reference audit (2026-11-25)
+
+A durable upstream watchlist and audit log now lives in [`.agent/REFERENCE_REPOS.md`](REFERENCE_REPOS.md). **Always read it with this handoff.** The monitored priority order is Zettrox/ztrx, Marvisak/VIctory, fxceless/victory-fork, xcl-dev/xcl. Review relevant commits, issues and PRs with their report dates, comments, patches, reversions and validation; compare the actual code before porting. Do not blindly cherry-pick.
+
+### Crash correlation
+
+- The crash index from `%LOCALAPPDATA%\\R4Y\\data\\7952987A\\crashes.log` contains several distinct classes. PID 34964 (2026-11-24 22:32:28 local) is a D3D12 invalid call: the debug layer rejected `ALLOW_UNORDERED_ACCESS` on `B5G5R5A1_UNORM`, followed by `0x887A0001`. This matches [VIctory #2258](https://github.com/Marvisak/VIctory/issues/2258) / [PR #2286](https://github.com/Marvisak/VIctory/pull/2286).
+- Earlier PIDs 18192, 31396, 20644, 1956 and 8608 report device removal/hangs, including `0x887A0006` after 28–33 command lists. These are not the same as the invalid-format query.
+- PID 20352 (2026-11-25 06:37:38 local) reports `0xc0000005` writing to `0x0` at `r4y-image-...dll+0x23cf683`. [XCL #505](https://github.com/xcl-dev/xcl/issues/505) and [XCL #675](https://github.com/xcl-dev/xcl/issues/675) explain the same game-image offset as the title's intentional GPU-progress watchdog failure path (the `GPU Loc Sig` check followed by a deliberate null write). Treat this as a watchdog symptom: the title did not observe progress. Do not treat the write-to-null as the underlying emulator bug without new evidence.
+- The RTX 3070 Ti investigation in XCL #675 is particularly relevant to the user's RTX 3070. One run implicated `CS_DepthProcessingHBO` with a 64-thread group and many ballot/exchange sites. Disabling that one shader stopped one limited A/B hang, but later comments identified another split-Wave64 dispatch as a hang source. Disabling every split-Wave64 shader avoided hangs in some runs but removed required compute features. The shader hash/path is **not** directly portable to R4Y because its translator/emitted DXIL differs.
+- The current `r4y-run.log` had no explicit `R4Y: host GPU failure` or `0x887A0006` hit in the latest run. It did have `slow host submission ms=5572 lists=9` at 06:37:22 local, 16 seconds before PID 20352.
+- In `r4y-gpu/src/host.rs::Host::execute`, this value is elapsed wall time from the post-preparation timestamp through `ExecuteCommandLists`, queue `Signal`, `SetEventOnCompletion` and `WaitForSingleObject(INFINITE)`. It means the fence for that nine-list submission completed after roughly 5.572 seconds. It is not just CPU preparation time and is not, by itself, proof of device removal or one guilty shader. In the ordinary path the lists are one submission group; per-list attribution requires the diagnostic timing path.
+
+### R4Y source changes made after the user supplied the new logs
+
+Branch: `feature/wave64-host-target`.
+
+- `crates/r4y-gpu/src/resource.rs`: `shared_texture()` now calls `GetResourceAllocationInfo` with the live host resource's `t.texture.GetDesc()`, rather than bit-casting the guest/title `ResourceDesc`. The latter can carry format/usage combinations the actual host resource does not have.
+  - Commit: `65ba0b315265dd5b7cf002b7a8ea53cefe8fe2d7`.
+- `crates/r4y-gpu/src/pipeline/make.rs`: pipeline workers reserve a 64 MiB stack (`64 << 20`) to avoid the NVIDIA driver compiler overflowing Rust's default 2 MiB stack, based on [VIctory #966](https://github.com/Marvisak/VIctory/issues/966) and commit [d09c31b](https://github.com/Marvisak/VIctory/commit/d09c31b4c14481155e7d0b33b0aea30d9333f152). This is independent driver robustness, not a fix for the title watchdog.
+  - Commit: `706179e62f78cd63fe925ba4d13a36284726d8da`.
+- `crates/r4y-shader/src/emit/mod.rs`: added `R4Y_WAVE64_CONSOLE_FLOW=0` as a diagnostic-only bypass of the `console_cf` cross-half Wave64-to-Wave32 fallback. It refuses shaders that need the retry; ordinary in-half DPP/swizzle/MBCNT split remains enabled. Default is enabled.
+  - Commit: `173e409fa938ed0485021da5d4a0b0c72d18572c`; later import cleanup: `b194221a932443984d05b24752aba195bb7b7570`.
+- `crates/r4y-gpu/src/shader_cache.rs`: the switch is included in the shader-cache fingerprint, and disabled mode is logged at startup. Enabled/disabled translations cannot collide in the same cache identity.
+  - Commit: `ae94e8127c5e1b28f12104a1321debf9683ff386`.
+- The parser, controlled refusal path and cache-fingerprint distinction have unit tests in source. They have **not yet been confirmed by CI or a local compile** at the time of this handoff.
+
+### Important distinction: `R4Y_GROUP_SYNC` is not this switch
+
+The `console_cf` fallback emits two group-shared exchange slots and two group barriers to exchange values between the two host waves. `R4Y_GROUP_SYNC` controls translated guest `s_barrier` instructions, not those built-in exchange barriers. Flipping `R4Y_GROUP_SYNC` is therefore not a valid A/B for this specific hypothesis.
+
+PowerShell A/B (set the environment variable before starting R4Y; the setting is read once per process):
+
+```powershell
+# Baseline: default cross-half console-flow path enabled
+Remove-Item Env:R4Y_WAVE64_CONSOLE_FLOW -ErrorAction SilentlyContinue
+.\\r4y-run.cmd
+
+# Diagnostic: refuse only shaders requiring the cross-half fallback
+$env:R4Y_WAVE64_CONSOLE_FLOW = "0"
+.\\r4y-run.cmd
+
+# Restore default for later runs
+Remove-Item Env:R4Y_WAVE64_CONSOLE_FLOW -ErrorAction SilentlyContinue
+```
+
+The disabled run may lose rendering/features because those shaders are intentionally refused. It is an isolation experiment, not a permanent setting. Record each run's timestamp, crash PID/type, whether a GPU-removal event appeared, and the hashes/reasons of newly refused pipelines. Keep the logs from the two runs separate.
+
+### CI status at this handoff
+
+- Current branch head when recorded: `b194221a932443984d05b24752aba195bb7b7570`.
+- PR [#16](https://github.com/cmyk-ux/r4y/pull/16) remains open.
+- The latest green CI run observed was #165 on the previous code head `a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa`, not the code changes above. No successful CI result for `b194221` was confirmed. Do not say these commits are tested until the exact current head has green CI and the runtime A/B is complete.
+
+### Next technical steps
+
+1. Pull the current `feature/wave64-host-target` head, inspect the diff and run rustfmt, targeted shader tests, workspace tests, Clippy, release and diagnostics builds. Verify CI for the exact head.
+2. On the RTX 3070, compare default mode with `R4Y_WAVE64_CONSOLE_FLOW=0`. Check whether the GPU-progress watchdog/device removal persists and which cross-half shader pipelines are refused.
+3. If the bypass removes the hang, instrument and fix the cross-half exchange/control-flow lowering; add a regression for divergent loops/ballot/exchange. Do not leave the feature disabled as the final solution.
+4. If the hang persists, isolate ordinary in-half split-Wave64 compute separately and add per-shader refusal/snapshot diagnostics before rewriting shader logic.
+5. Revisit memory/streaming (commit pressure, DirectStorage, XMem mapping, card buffers) only with corroborating measurements. The VIctory APU-allocation telemetry PR #1720 is a useful later improvement, but no APU allocation refusal was shown in the supplied latest logs.
+6. Resume the existing slot-zero view mismatch and large logical descriptor-heap virtualization backlog after the immediate GPU progress path is isolated.
+
 ## 5. Immediate priority order
 
-1. Fix host-wave awareness and wave64 compute handling; it directly explains rejected pipelines and dropped dispatches.
-2. Investigate slot-zero Texture1D/Texture2D mismatch with source-to-host descriptor provenance.
-3. Design actual descriptor virtualization for the 1,245,184 logical title slots on a 1,000,000 physical NVIDIA heap; do not confuse warning-rate limiting/safe null clamping with preservation.
-4. Re-run without GPU-Based Validation for representative performance, then perform focused GBV/DRED checks for correctness.
-5. Keep issue/PR state and test evidence updated in this file.
+1. Get CI green for the exact current feature head and run the targeted shader/workspace tests; the new changes are not yet validated.
+2. Run the controlled `R4Y_WAVE64_CONSOLE_FLOW=0` A/B on the RTX 3070 and correlate refused pipelines with the title watchdog / D3D12 device-removal events.
+3. Depending on the A/B, fix cross-half exchange/control-flow or isolate in-half split-Wave64 dispatches. Do not copy an upstream shader hash as if it were R4Y's.
+4. Exercise the shared-texture allocation-info fix against the old `B5G5R5A1_UNORM` debug-layer failure; verify the larger NVIDIA pipeline-worker stack under actual PSO compilation.
+5. Investigate slot-zero Texture1D/Texture2D mismatch with source-to-host descriptor provenance.
+6. Design actual descriptor virtualization for the 1,245,184 logical title slots on a 1,000,000 physical NVIDIA heap; do not confuse warning-rate limiting/safe null clamping with preservation.
+7. Re-run without GPU-Based Validation for representative performance, then perform focused GBV/DRED checks for correctness.
+8. Revisit upstream watchlist commits/issues/PRs in the priority order documented in `.agent/REFERENCE_REPOS.md`; record relevant changes and test evidence here.
 
 ## 6. How to resume in a new chat
 
 User can say: **"Confira o arquivo .agent/SESSION_HANDOFF.md no repo cmyk-ux/r4y e continue."**
 
 At session start:
-1. Read this file from the current default branch.
-2. Inspect the latest commits, open PRs/issues and current working branch before editing.
-3. Check whether the findings above have been resolved or superseded by newer code.
-4. Continue implementation; do not ask the user to re-explain the project.
-5. Update this file when technical state changes, including commit/PR IDs, exact tests, limitations and next steps.
+1. Identify the branch the user is actively testing; read this handoff from that branch, not blindly from the default branch.
+2. Read `.agent/REFERENCE_REPOS.md` and preserve its requested priority order: Zettrox/ztrx, Marvisak/VIctory, fxceless/victory-fork, xcl-dev/xcl.
+3. Inspect the current branch head, diff, CI, open PRs/issues and relevant upstream changes before editing.
+4. Check whether the findings above have been resolved or superseded by newer code.
+5. Continue implementation; do not ask the user to re-explain the project or repeat known diagnostic results.
+6. Update both files when reference findings, code, test evidence or next steps change.
 
 Do not put game assets, proprietary title data, shader dumps, keys, credentials, or machine-specific sensitive information in Git. The log hashes above are diagnostic shader identifiers supplied for this investigation; do not add shader binaries, disassembly, or title-derived material.
