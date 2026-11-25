@@ -378,6 +378,13 @@ impl Target {
         lanes_max: 128,
     };
 
+    /// The host reported no usable wave operations. Any shader requiring a
+    /// fixed wave size is rejected; shaders without wave operations remain valid.
+    pub const NONE: Self = Self {
+        lanes_min: 1,
+        lanes_max: 0,
+    };
+
     /// Whether the host supports waves with this lane count.
     pub fn runs(self, lanes: u32) -> bool {
         (self.lanes_min..=self.lanes_max).contains(&lanes)
