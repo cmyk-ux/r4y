@@ -113,6 +113,13 @@ fn uncapped_layout(count: u32, views: u32) -> Option<(u32, u32)> {
     Some((count, MIN_DYNAMIC.min(available)))
 }
 
+/// Maximum transient slots that stay before the heap's final three
+/// null/sentinel entries without shrinking the title's mirrored prefix.
+fn fit_dynamic_slots(count: u32, dynamic: u32, views: u32) -> Option<u32> {
+    let available = views.checked_sub(3)?.checked_sub(count)?;
+    Some(dynamic.min(available))
+}
+
 /// Configure shader translation for the view-heap capacity discovered by
 /// the host device. This runs before shader-cache keys are constructed.
 pub(crate) fn host_views(views: u32) {
@@ -178,7 +185,7 @@ impl HostHeap {
         // Translated shaders clamp their indices below the physical `views` limit or
         // `HEAP_SAMPLERS`: slots up to there exist and stay null.
         let samplers = r4y_shader::emit::HEAP_SAMPLERS;
-        let (heap, count, extra) = if sampler {
+        let (heap, count, mut extra) = if sampler {
             match make(count.max(samplers)) {
                 Ok(heap) => (heap, count, 0),
                 Err(e) => {
@@ -241,6 +248,26 @@ impl HostHeap {
             (heap.GetGPUDescriptorHandleForHeapStart().ptr, heap.GetDesc().NumDescriptors)
         };
         let null = views - 2;
+        if !sampler {
+            if total < views {
+                tracing::warn!(total, views, "host created a view heap smaller than the shader-visible limit");
+                return None;
+            }
+            let Some(fitted) = fit_dynamic_slots(count, extra, views) else {
+                tracing::warn!(count, views, "title descriptor prefix overlaps the final null views");
+                return None;
+            };
+            if fitted < extra {
+                tracing::warn!(
+                    requested_dynamic = extra,
+                    available_dynamic = fitted,
+                    count,
+                    views,
+                    "reduced transient descriptor range to keep null views outside the title prefix"
+                );
+                extra = fitted;
+            }
+        }
         GPU_RANGES.lock().unwrap_or_else(|e| e.into_inner()).push((
             gpu,
             u64::from(total) * u64::from(step),
@@ -676,24 +703,6 @@ impl HostHeap {
                     for_draw,
                     "title slot outside the mirrored title range (high-water mark; one warning per 4096-slot range)"
                 );
-            }
-            if handle != 0 {
-                // SAFETY: the handle points to the title's three-word
-                // descriptor record, which is the same memory read by view_at.
-                let [tag, view, generation] =
-                    unsafe { (handle as *const [u32; 3]).read_unaligned() };
-                if tag == VIEW_TAG && view_at(view, generation).is_some() {
-                    static LIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    let live = LIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if live.is_power_of_two() {
-                        tracing::warn!(
-                            index,
-                            live_views_past_mirror = live,
-                            for_draw,
-                            "live title views exist past the mirrored prefix; these descriptors need virtual remapping"
-                        );
-                    }
-                }
             }
             return None;
         }
@@ -1463,6 +1472,27 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_slots_stop_before_the_final_three_null_descriptors() {
+        assert_eq!(fit_dynamic_slots(1_900_000, DYNAMIC, r4y_shader::emit::HEAP_VIEWS), Some(DYNAMIC));
+        assert_eq!(
+            fit_dynamic_slots(
+                r4y_shader::emit::HEAP_VIEWS - DYNAMIC,
+                DYNAMIC,
+                r4y_shader::emit::HEAP_VIEWS
+            ),
+            Some(DYNAMIC - 3)
+        );
+        assert_eq!(
+            fit_dynamic_slots(r4y_shader::emit::HEAP_VIEWS - 3, DYNAMIC, r4y_shader::emit::HEAP_VIEWS),
+            Some(0)
+        );
+        assert_eq!(
+            fit_dynamic_slots(r4y_shader::emit::HEAP_VIEWS - 2, DYNAMIC, r4y_shader::emit::HEAP_VIEWS),
+            None
+        );
+    }
 
     #[test]
     fn uncapped_fallback_keeps_the_physical_shader_heap_capacity() {

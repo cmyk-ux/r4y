@@ -232,7 +232,7 @@ impl Host {
         // SAFETY: a plain descriptor-heap capability probe; the temporary
         // heap is dropped immediately and is not bound to a command list.
         let full = unsafe {
-            self.device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+            self.device.CreateDescriptorHeap::<ID3D12DescriptorHeap>(&D3D12_DESCRIPTOR_HEAP_DESC {
                 Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                 NumDescriptors: super::HEAP_VIEWS,
                 Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,

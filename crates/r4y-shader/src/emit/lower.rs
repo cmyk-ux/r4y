@@ -4841,7 +4841,7 @@ impl<'a> Lower<'a> {
         let index = if title < views && self.is_heap_only(src) {
             let end = self.s.m.i32(title);
             let past = self.s.m.cmp(c, pred::IUGE, index, end);
-            let null = self.s.m.i32(if buffer { super::null_buffer_view() } else { views - 1 });
+            let null = self.s.m.i32(if buffer { super::null_buffer_view() - u32::from(props.0 & 0x1000 != 0) } else { views - 1 });
             self.s.m.select(c, past, null, index)
         } else {
             index
