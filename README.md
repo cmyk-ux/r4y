@@ -1,4 +1,5 @@
-# R4Y — Recompile4You
+<img width="1122" height="634" alt="R4Y BOOTSTRAP" src="https://github.com/user-attachments/assets/411698af-0b0a-40cd-b0a9-b13911317a3d" />
+# R4Y — Recomp4You
 
 R4Y is an experimental Windows compatibility engine for running Xbox Series X|S title builds from game files that users already own and can read on disk.
 
