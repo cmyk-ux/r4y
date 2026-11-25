@@ -67,6 +67,28 @@ function Write-Info([string]$Message) { Write-Host ('  ' + $Message) -Foreground
 function Write-Ok([string]$Message) { Write-Host ('[OK] ' + $Message) -ForegroundColor Green }
 function Write-Warn([string]$Message) { Write-Host ('[!] ' + $Message) -ForegroundColor Yellow }
 
+function Show-Banner {
+    # Build the logo from Unicode code points so Windows PowerShell 5.1 can
+    # read this script even when the file is checked out without a UTF-8 BOM.
+    $full = [string][char]0x2588
+    $shade = [string][char]0x2592
+    $lines = @(
+        (($full * 11) + '   ' + ($full * 5) + ' ' + ($full * 5) + '  ' + ($full * 5) + ' ' + ($full * 5)),
+        (($shade * 2) + ($full * 3) + ($shade * 5) + ($full * 3) + ' ' + ($shade * 2) + ($full * 3) + ' ' + ($shade * 2) + ($full * 3) + '  ' + ($shade * 2) + ($full * 3) + ' ' + ($shade * 2) + ($full * 3)),
+        (' ' + $shade + ($full * 3) + '    ' + $shade + ($full * 3) + '  ' + $shade + ($full * 3) + '  ' + $shade + ($full * 3) + ' ' + $shade + ' ' + ($shade * 2) + ($full * 3) + ' ' + ($full * 3)),
+        (' ' + $shade + ($full * 10) + '   ' + $shade + ($full * 11) + '  ' + ($shade * 2) + ($full * 5)),
+        (' ' + $shade + ($full * 3) + ($shade * 5) + ($full * 3) + '  ' + ($shade * 6) + ($full * 3) + $shade + ' ' + '  ' + ($shade * 2) + ($full * 3)),
+        (' ' + $shade + ($full * 3) + '    ' + $shade + ($full * 3) + '        ' + $shade + ($full * 3) + $shade + '     ' + $shade + ($full * 3)),
+        (' ' + ($full * 5) + '   ' + ($full * 5) + '       ' + ($full * 5) + '     ' + ($full * 5)),
+        (($shade * 5) + '   ' + ($shade * 5) + '       ' + ($shade * 5))
+    )
+    Clear-Host
+    foreach ($line in $lines) { Write-Host $line -ForegroundColor Cyan }
+    Write-Host ''
+    Write-Host 'R4Y - Recompile4You' -ForegroundColor White
+    Write-Host ''
+}
+
 function Confirm-Action([string]$Question) {
     if ($script:AssumeYes) { return $true }
     if ([Console]::IsInputRedirected) { return $false }
@@ -252,16 +274,28 @@ function Select-Game {
     }
 
     $directory = $null
+    $executable = $null
     if (-not [Console]::IsInputRedirected) {
-        $typed = Read-Host 'Enter the game folder, or press ENTER to browse'
-        if ($typed) { $directory = $typed.Trim().Trim('"') }
+        $typed = Read-Host 'Enter the game folder or executable path, or press ENTER to browse'
+        if ($typed) {
+            $typed = $typed.Trim().Trim('"')
+            if (Test-Path -LiteralPath $typed -PathType Leaf) {
+                $candidate = Get-Item -LiteralPath $typed
+                if ($candidate.Extension -ine '.exe') {
+                    throw ('The selected file is not a Windows executable: ' + $typed)
+                }
+                $executable = $candidate.FullName
+                $directory = $candidate.DirectoryName
+            } else {
+                $directory = $typed
+            }
+        }
     }
     if (-not $directory) { $directory = Pick-Folder }
     if (-not $directory -or -not (Test-Path -LiteralPath $directory -PathType Container)) { throw 'A valid game folder was not selected.' }
     $directory = (Resolve-Path -LiteralPath $directory).ProviderPath
 
-    $executable = $null
-    {
+    if (-not $executable) {
         $found = @()
         $found += @(Get-ChildItem -LiteralPath $directory -Filter '*.exe' -File -ErrorAction SilentlyContinue)
         foreach ($child in (Get-ChildItem -LiteralPath $directory -Directory -ErrorAction SilentlyContinue)) {
@@ -413,6 +447,7 @@ function Write-Launcher {
 
 $exitCode = 1
 try {
+    Show-Banner
     Parse-Arguments $OptionString
     if (-not $script:LaunchOnly -and -not $script:DryRun) {
         New-Item -ItemType Directory -Force -Path (Join-Path $script:LocalRoot 'logs') | Out-Null
