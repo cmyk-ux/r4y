@@ -415,14 +415,14 @@ impl Structured {
 
 /// Builds the per-lane form of `program`.
 pub fn structure(program: &Program) -> Result<Structured, ShaderError> {
-    run(Lanes::new(program, true, false)?)
+    run(Lanes::new(program, false)?)
 }
 
 /// The per-lane booleans with every lane modelled through every block and
 /// every branch. The resulting `execs` preserve each lane's active mask
 /// for vector instructions while scalar control flow remains wave-uniform.
 pub fn structure_console(program: &Program) -> Result<Structured, ShaderError> {
-    run(Lanes::new(program, true, true)?)
+    run(Lanes::new(program, true)?)
 }
 
 /// The per-lane form with a pixel's discarded lanes taken out of the live
@@ -434,8 +434,11 @@ pub fn killing(program: &Program) -> Result<Structured, ShaderError> {
 }
 
 fn structure_as(program: &Program, helpers: bool) -> Result<Structured, ShaderError> {
-    let mut l = Lanes::new(program, helpers, false)?;
-    run(l)
+    let mut lanes = Lanes::new(program, false)?;
+    if !helpers {
+        lanes.kills.clear();
+    }
+    run(lanes)
 }
 
 fn run(mut l: Lanes<'_>) -> Result<Structured, ShaderError> {
@@ -515,7 +518,7 @@ struct SopMasks {
 const MAX_ROUNDS: usize = 256;
 
 impl<'a> Lanes<'a> {
-    fn new(p: &'a Program, helpers: bool, console: bool) -> Result<Self, ShaderError> {
+    fn new(p: &'a Program, console: bool) -> Result<Self, ShaderError> {
         let blocks = &p.blocks;
         let order = crate::ir::reverse_postorder(blocks);
         let mut index = vec![usize::MAX; blocks.len()];
