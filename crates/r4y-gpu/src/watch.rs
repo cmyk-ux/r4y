@@ -464,6 +464,12 @@ impl Drop for Writing {
 /// `kernel_will_write`) around the title's kernel reads into its own
 /// memory and DirectStorage's writes to addresses.
 pub fn writing(at: usize, len: usize) -> Writing {
+    // An empty interval must stay empty even when its address is unaligned.
+    // In particular, do not open guards or dirty the page containing `at`.
+    if len == 0 {
+        let page = at / PAGE;
+        return Writing { first: page, last: page };
+    }
     // The length is the title's (`fread`'s size times count, saturated).
     let (first, last) = (at / PAGE, at.saturating_add(len).div_ceil(PAGE));
     let mut g = guards();
@@ -475,6 +481,10 @@ pub fn writing(at: usize, len: usize) -> Writing {
 /// The runtime mapped or unmapped title memory `[at, at + len)`: what it
 /// shows is new, and read-write.
 pub fn title_memory_remapped(at: usize, len: usize) {
+    // An empty remap changes neither pages nor alias relationships.
+    if len == 0 {
+        return;
+    }
     let (first, last) = (at / PAGE, at.saturating_add(len).div_ceil(PAGE));
     let mut g = guards();
     changed(&mut g, first, last);
@@ -774,6 +784,32 @@ pub(crate) mod tests {
         // takes it for `a`'s pages here).
         unsafe { (c as *mut u32).write_volatile(1) };
         assert_eq!(t.take(a, a + 2 * PAGE), [(a, a + PAGE)]);
+    }
+
+    /// Zero-length writes/remaps at unaligned addresses must not dirty a
+    /// page or remove its alias. A later real write through the second view
+    /// must still reach the first view's tracker.
+    #[test]
+    fn empty_writes_and_remaps_leave_clean_pages_and_aliases_untouched() {
+        let (a, b) = twin_views(1);
+        let tracked = track(a, PAGE, true).expect("the first view is tracked");
+        assert_eq!(tracked.take(a, a + PAGE), [(a, a + PAGE)]);
+        assert!(tracked.take(a, a + PAGE).is_empty());
+
+        let write = writing(b + 1, 0);
+        assert!(!tracked.changed(a / PAGE), "empty write must not dirty its page while the guard lives");
+        drop(write);
+        assert!(!tracked.changed(a / PAGE), "dropping an empty write must remain a no-op");
+
+        title_memory_remapped(b + 1, 0);
+        assert!(!tracked.changed(a / PAGE), "empty remap must not dirty the old mapping");
+        assert!(tracked.take(a, a + PAGE).is_empty());
+
+        // SAFETY: the second live mapping aliases the tracked first page;
+        // the guard installed by `take` makes this write observable.
+        unsafe { ((b + 8) as *mut u8).write_volatile(7) };
+        assert_eq!(tracked.take(a, a + PAGE), [(a, a + PAGE)]);
+        drop(tracked);
     }
 
     /// A write or mapping that runs past the end of the address space (a
