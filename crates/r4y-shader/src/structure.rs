@@ -392,6 +392,9 @@ pub struct Structured {
     /// they are written: every such lane reaches the writing block, so a
     /// ballot there gives the mask as data.
     pub active: HashSet<Value>,
+    /// Per block and instruction: EXEC at each vector instruction, even on
+    /// paths which a lane did not take (console-flow lowering).
+    pub execs: Vec<Vec<Option<Bool>>>,
     /// `v_readlane_b32` results of a constant lane: the SGPR value that
     /// `v_writelane_b32` spilled to that lane, the same along every path.
     pub restored: HashMap<Value, Value>,
@@ -412,7 +415,14 @@ impl Structured {
 
 /// Builds the per-lane form of `program`.
 pub fn structure(program: &Program) -> Result<Structured, ShaderError> {
-    structure_as(program, true)
+    run(Lanes::new(program, true, false)?)
+}
+
+/// The per-lane booleans with every lane modelled through every block and
+/// every branch. The resulting `execs` preserve each lane's active mask
+/// for vector instructions while scalar control flow remains wave-uniform.
+pub fn structure_console(program: &Program) -> Result<Structured, ShaderError> {
+    run(Lanes::new(program, true, true)?)
 }
 
 /// The per-lane form with a pixel's discarded lanes taken out of the live
@@ -424,10 +434,11 @@ pub fn killing(program: &Program) -> Result<Structured, ShaderError> {
 }
 
 fn structure_as(program: &Program, helpers: bool) -> Result<Structured, ShaderError> {
-    let mut l = Lanes::new(program)?;
-    if !helpers {
-        l.kills.clear();
-    }
+    let mut l = Lanes::new(program, helpers, false)?;
+    run(l)
+}
+
+fn run(mut l: Lanes<'_>) -> Result<Structured, ShaderError> {
     loop {
         let execs = l.masks_in_order();
         let cond = l.paths()?;
@@ -446,6 +457,8 @@ type Key = (Value, Value);
 
 struct Lanes<'a> {
     p: &'a Program,
+    /// Every lane is modelled through each block, even outside its EXEC.
+    console: bool,
     order: Vec<usize>,
     /// Reverse-postorder index per block.
     index: Vec<usize>,
@@ -502,7 +515,7 @@ struct SopMasks {
 const MAX_ROUNDS: usize = 256;
 
 impl<'a> Lanes<'a> {
-    fn new(p: &'a Program) -> Result<Self, ShaderError> {
+    fn new(p: &'a Program, helpers: bool, console: bool) -> Result<Self, ShaderError> {
         let blocks = &p.blocks;
         let order = crate::ir::reverse_postorder(blocks);
         let mut index = vec![usize::MAX; blocks.len()];
@@ -527,6 +540,7 @@ impl<'a> Lanes<'a> {
         }
         let mut l = Lanes {
             p,
+            console,
             order,
             index,
             incoming,
@@ -801,6 +815,7 @@ impl<'a> Lanes<'a> {
                 .iter()
                 .filter_map(|&(b, i)| execs[b][i].map(|e| ((b, i), e)))
                 .collect(),
+            execs: execs.to_vec(),
             bools: self.b,
             exits,
             guards,
@@ -921,7 +936,7 @@ impl<'a> Lanes<'a> {
         {
             return Some((m, derived));
         }
-        if !self.unresolved.contains(&id) {
+        if !self.console && !self.unresolved.contains(&id) {
             for value in [true, false] {
                 let b = &mut self.b;
                 let holds = forward.iter().all(|&(e, m)| {
