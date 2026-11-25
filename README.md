@@ -137,6 +137,8 @@ r4y-run.cmd
 
 A diagnostics build is required for the D3D12 debug layer, DRED and debug-only switches. The installer does not enable these in a normal release build. Diagnostic output and runtime data are stored outside the repository under `%LOCALAPPDATA%\R4Y`.
 
+R4Y probes the device's shader-visible view-heap limit before translating shaders. On drivers that reject the console-sized heap, the capped fallback keeps separate ranges for mirrored title descriptors, transient descriptors, long-lived descriptor pairs and null sentinels. Title indices beyond the mirrored prefix resolve to null instead of aliasing R4Y's transient descriptors. **This is a safety fallback, not complete descriptor virtualization:** high title descriptors are not preserved yet, and scenes that need them may be incomplete. See [issue #4](https://github.com/cmyk-ux/r4y/issues/4).
+
 ## Development documentation
 
 - [Architecture and runtime flow](docs/architecture.md)

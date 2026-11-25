@@ -203,7 +203,8 @@ use crate::{ShaderError, io, ir, resource, structure};
 
 pub use sampler::StaticSampler;
 pub use shader::{
-    HEAP_SAMPLERS, HEAP_VIEWS, MEMORY_SPACE, NULL_BUFFER_VIEW, ROOT_CBV_SPACE, SAMPLER_SPACE,
+    heap_views, null_buffer_view, set_view_heap, title_views, HEAP_SAMPLERS, HEAP_VIEWS,
+    HEAP_VIEWS_PORTABLE, MEMORY_SPACE, NULL_BUFFER_VIEW, ROOT_CBV_SPACE, SAMPLER_SPACE,
     USER_DATA_SPACE, VIEW_STRIDES,
 };
 

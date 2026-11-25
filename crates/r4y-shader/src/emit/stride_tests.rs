@@ -302,27 +302,38 @@ fn a_heap_buffer_read_by_element_takes_the_views_stride() {
 /// indices"): a texture descriptor read as a buffer one is a wild address.
 #[test]
 fn a_heap_buffer_read_where_no_buffer_view_is_reads_zeros() {
-    let shader = build(
-        HEAP_ELEMENT_WAVE32,
-        vec![
-            param(RootType::Constants, 0),
-            param(RootType::ResourceHeap, 1),
-            param(RootType::Table, 2),
-        ],
-        vec![entry(ResourceType::Uav, 4, 2)],
-        32,
-    );
-    let texel = [[1.0f32, 2.0, 3.0, 4.0]];
-    let views = [View::RawUav(32), View::Texture(1, 1, &texel), View::NullBuffers];
     let _one = super::valu_tests::ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    struct RestoreViewHeap;
+    impl Drop for RestoreViewHeap {
+        fn drop(&mut self) {
+            super::set_view_heap(super::HEAP_VIEWS, super::HEAP_VIEWS);
+        }
+    }
+    let _restore = RestoreViewHeap;
+    let texel = [[1.0f32, 2.0, 3.0, 4.0]];
+    let views = [View::RawUav(32), View::Texture(1, 1, &texel), View::NullBuffers];
     let mut ran = 0;
     for (label, warp) in [("hardware", false), ("warp", true)] {
         let Ok(host) = Host::new(warp) else {
             eprintln!("no SM 6.6 {label} device; skipped");
             continue;
         };
+        // This synthetic heap is exactly as large as the device permits.
+        // Set the translator before building the shader that indexes it.
+        let capacity = host.view_heap_limit();
+        super::set_view_heap(capacity, capacity);
+        let shader = build(
+            HEAP_ELEMENT_WAVE32,
+            vec![
+                param(RootType::Constants, 0),
+                param(RootType::ResourceHeap, 1),
+                param(RootType::Table, 2),
+            ],
+            vec![entry(ResourceType::Uav, 4, 2)],
+            32,
+        );
         let (root, pso) = host
             .compute_pipeline(&shader)
             .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));

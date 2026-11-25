@@ -4827,12 +4827,29 @@ impl<'a> Lower<'a> {
     /// buffer one (a wild address: the texture's address shifted 8 bits
     /// down) and faulted the device.
     fn buffer_guard(&mut self, src: &Source, index: V, sampler: bool, props: (u32, u32)) -> V {
-        // Typed, raw and structured buffers (DXIL resource kinds 10-12).
-        if sampler || !(10..=12).contains(&(props.0 & 0xFF)) || !self.is_heap_direct(src) {
+        // A descriptor from the resource heap itself may name an index the
+        // host deliberately leaves for transient descriptors. A capped host
+        // redirects that invalid title range to a null slot before making
+        // the handle; table descriptors made afresh bypass this path.
+        if sampler || !self.is_heap_direct(src) {
             return index;
         }
         let c = self.cur;
-        let last = self.s.m.i32(super::HEAP_VIEWS - 1);
+        let buffer = (10..=12).contains(&(props.0 & 0xFF));
+        let views = super::heap_views();
+        let title = super::title_views();
+        let index = if title < views && self.is_heap_only(src) {
+            let end = self.s.m.i32(title);
+            let past = self.s.m.cmp(c, pred::IUGE, index, end);
+            let null = self.s.m.i32(if buffer { super::null_buffer_view() - u32::from(props.0 & 0x1000 != 0) } else { views - 1 });
+            self.s.m.select(c, past, null, index)
+        } else {
+            index
+        };
+        if !buffer {
+            return index;
+        }
+        let last = self.s.m.i32(views - 1);
         let over = self.s.m.cmp(c, pred::IUGT, index, last);
         let index = self.s.m.select(c, over, last, index);
         let four = self.s.m.i32(4);
@@ -4845,9 +4862,16 @@ impl<'a> Lower<'a> {
         let zero = self.s.m.i32(0);
         let none = self.s.m.cmp(c, pred::EQ, stride, zero);
         // The null unordered access view sits just below the null SRV.
-        let null = super::NULL_BUFFER_VIEW - u32::from(props.0 & 0x1000 != 0);
+        let null = super::null_buffer_view() - u32::from(props.0 & 0x1000 != 0);
         let null = self.s.m.i32(null);
         self.s.m.select(c, none, null, index)
+    }
+
+    /// True only when every possible source of this descriptor is the
+    /// resource heap itself. Mixed table/heap sources retain table indices.
+    fn is_heap_only(&self, src: &Source) -> bool {
+        let leaves = src.leaves();
+        !leaves.is_empty() && leaves.iter().all(|leaf| self.is_heap_direct(leaf))
     }
 
     /// Whether a descriptor comes from the resource heap itself (root type
