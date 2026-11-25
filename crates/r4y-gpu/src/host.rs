@@ -461,6 +461,9 @@ pub(crate) struct HostList {
     /// data without marker texts), with the host GPU range a copy reads.
     #[cfg(feature = "diagnostics")]
     notes: Mutex<Vec<Note>>,
+    /// Markers for dispatches recorded in this list's prelude command list.
+    #[cfg(feature = "diagnostics")]
+    prelude_notes: Mutex<Vec<String>>,
     /// In a frame `crate::capture` lists: the textures the list renders to
     /// or writes, and the pipeline that first wrote each (diagnostics).
     #[cfg(feature = "diagnostics")]
@@ -713,6 +716,8 @@ impl Host {
                 indirect_args: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
                 notes: Mutex::default(),
+                #[cfg(feature = "diagnostics")]
+                prelude_notes: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
                 targets: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
@@ -1010,7 +1015,13 @@ impl Host {
                 let done = p.pLastBreadcrumbValue.as_ref().copied().unwrap_or(0);
                 let ours = p.pCommandList.as_ref().map(|l| l.as_raw());
                 let index = runs.iter().position(|r| Some(r.list.as_raw()) == ours);
-                progress.push(format!("{done}/{} {index:?}", p.BreadcrumbCount));
+                let prelude_index = runs
+                    .iter()
+                    .position(|r| Some(r.prelude.1.as_raw()) == ours);
+                progress.push(format!(
+                    "{done}/{} main={index:?} prelude={prelude_index:?}",
+                    p.BreadcrumbCount
+                ));
                 node = p.pNext;
             }
             text.push_str(&format!("; breadcrumbs (done/count, list) {progress:?}"));
@@ -1026,21 +1037,39 @@ impl Host {
                     ));
                     let list = p.pCommandList.as_ref().map(|l| l.as_raw());
                     let run = runs.iter().find(|r| Some(r.list.as_raw()) == list);
-                    // The k-th marker command is the k-th note.
+                    let prelude = runs
+                        .iter()
+                        .find(|r| Some(r.prelude.1.as_raw()) == list);
+                    // The k-th marker command is paired with the k-th note
+                    // from the matching main or prelude command list.
                     #[cfg(feature = "diagnostics")]
-                    let markers: Vec<(u32, String)> = run.map_or_else(Vec::new, |r| {
-                        let notes = r.notes.lock().unwrap_or_else(|e| e.into_inner());
+                    let markers: Vec<(u32, String)> = {
+                        let main_notes = run.map(|r| {
+                            r.notes
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .iter()
+                                .map(|(note, range)| {
+                                    let place = fault_va.zip(*range).map(|(va, r)| fault_in(va, r));
+                                    format!("{note}{}", place.unwrap_or_default())
+                                })
+                                .collect::<Vec<_>>()
+                        });
+                        let prelude_notes = prelude.map(|r| {
+                            r.prelude_notes
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone()
+                        });
+                        let notes = main_notes.or(prelude_notes).unwrap_or_default();
                         history
                             .iter()
                             .enumerate()
                             .filter(|(_, op)| **op == D3D12_AUTO_BREADCRUMB_OP_SETMARKER)
                             .zip(notes.iter())
-                            .map(|((at, _), (note, range))| {
-                                let place = fault_va.zip(*range).map(|(va, r)| fault_in(va, r));
-                                (at as u32, format!("{note}{}", place.unwrap_or_default()))
-                            })
+                            .map(|((at, _), note)| (at as u32, note.clone()))
                             .collect()
-                    });
+                    };
                     #[cfg(not(feature = "diagnostics"))]
                     let markers: Vec<(u32, String)> = Vec::new();
                     #[cfg(not(feature = "diagnostics"))]
@@ -1050,6 +1079,9 @@ impl Host {
                     } else if let Some(r) = run {
                         let pipelines = r.pipelines.lock().unwrap_or_else(|e| e.into_inner());
                         text.push_str(&format!(", its pipelines {pipelines:?}"));
+                    } else if let Some(r) = prelude {
+                        let notes = r.prelude_notes.lock().unwrap_or_else(|e| e.into_inner());
+                        text.push_str(&format!(", prelude operations {notes:?}"));
                     }
                 }
                 plain = p.pNext;
@@ -1486,6 +1518,8 @@ impl HostList {
     /// At submission: move each texture the list uses from its real state
     /// to the state the list assumes at its start.
     fn prelude(&self) -> Option<ID3D12CommandList> {
+        #[cfg(feature = "diagnostics")]
+        self.prelude_notes.lock().unwrap_or_else(|e| e.into_inner()).clear();
         // Depth textures and their twins first, from their real states and
         // back: the side each first use needs, made newer.
         let twins = self.twins.lock().unwrap_or_else(|e| e.into_inner());
@@ -1518,18 +1552,28 @@ impl HostList {
                     let Some(Some(twin)) = depth.twin.get() else { continue };
                     // From each texture's real state to the copy's and back.
                     let mut back = Vec::new();
-                    twin.copy(list, depth, *to_depth, &mut |t, wanted| {
-                        let real = t.state.load(Ordering::Relaxed);
-                        let wanted = legal_state(&t.texture, wanted);
-                        (real != wanted).then(|| {
-                            back.push(transition(
-                                &t.texture,
-                                D3D12_RESOURCE_STATES(wanted as i32),
-                                D3D12_RESOURCE_STATES(real as i32),
-                            ));
-                            transition(&t.texture, D3D12_RESOURCE_STATES(real as i32), D3D12_RESOURCE_STATES(wanted as i32))
-                        })
-                    });
+                    twin.copy(
+                        list,
+                        depth,
+                        *to_depth,
+                        &mut |t, wanted| {
+                            let real = t.state.load(Ordering::Relaxed);
+                            let wanted = legal_state(&t.texture, wanted);
+                            (real != wanted).then(|| {
+                                back.push(transition(
+                                    &t.texture,
+                                    D3D12_RESOURCE_STATES(wanted as i32),
+                                    D3D12_RESOURCE_STATES(real as i32),
+                                ));
+                                transition(
+                                    &t.texture,
+                                    D3D12_RESOURCE_STATES(real as i32),
+                                    D3D12_RESOURCE_STATES(wanted as i32),
+                                )
+                            })
+                        },
+                        &mut |what| self.note_prelude(list, what),
+                    );
                     if !back.is_empty() {
                         list.ResourceBarrier(&back);
                     }
@@ -1544,6 +1588,27 @@ impl HostList {
             fail(format_args!("a host state prelude did not record ({e})"));
         }
         list.cast().ok()
+    }
+
+    /// Marks an operation in the auxiliary list recorded just before this
+    /// list. Keeping these strings separately lets DRED map prelude markers
+    /// without accidentally pairing them with the main list's notes.
+    fn note_prelude(&self, list: &ID3D12GraphicsCommandList, what: String) {
+        #[cfg(feature = "diagnostics")]
+        if dred_on() {
+            let text: Vec<u16> = what.encode_utf16().chain([0]).collect();
+            const UNICODE: u32 = 0;
+            // SAFETY: the auxiliary list is open; SetMarker copies this text.
+            unsafe {
+                list.SetMarker(UNICODE, Some(text.as_ptr().cast()), 2 * text.len() as u32)
+            };
+            self.prelude_notes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(what);
+        }
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = (list, what);
     }
 
     /// Notes what the command about to be recorded does, as a marker
