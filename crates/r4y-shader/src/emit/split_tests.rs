@@ -28,6 +28,46 @@ const DPP_ROW_MASK: &[u32] = &[
     0x3F00_E400, // v_mov_b32_dpp v2, v0: quad permute, row_mask 0x3
 ];
 
+const MASK_COUNT: &[u32] = &[
+    0x7D88_00A8, // v_cmp_gt_u32 vcc, 40, v0
+    0xBE89_106A, // s_bcnt1_i32_b64 s9, vcc
+    0x7E04_0209, // v_mov_b32 v2, s9
+];
+
+const CROSS_HALF_READ: &[u32] = &[
+    0xD760_0009,
+    0x0001_5100, // v_readlane_b32 s9, v0, 40
+    0x7E04_0209, // v_mov_b32 v2, s9
+];
+
+const BRANCH_EXCHANGE: &[u32] = &[
+    0x7E04_0281, // v_mov_b32 v2, 1
+    0x7D88_0094, // v_cmp_gt_u32 vcc, 20, v0
+    0xBE8A_246A, // s_and_saveexec_b64 s[10:11], vcc
+    0xBF88_0003, // s_cbranch_execz end
+    0xD760_0009,
+    0x0001_1500, // v_readlane_b32 s9, v0, 10
+    0x7E04_0209, // v_mov_b32 v2, s9
+    0x88FE_0A7E, // s_or_b64 exec, exec, s[10:11]
+];
+
+const READ_FIRST_LANE: &[u32] = &[
+    0x7E12_0500, // v_readfirstlane_b32 s9, v0
+    0x7E04_0209, // v_mov_b32 v2, s9
+];
+
+const SAVEEXEC_SCC: &[u32] = &[
+    0xBE89_03AA, // s_mov_b32 s9, 42
+    0x7D88_0080, // v_cmp_gt_u32 vcc, 0, v0 (false in every lane)
+    0xBE8C_246A, // s_and_saveexec_b64 s[12:13], vcc
+    0xBF84_0003, // s_cbranch_scc0 skip body
+    0xD760_000E,
+    0x0001_1500, // v_readlane_b32 s14, v0, 10
+    0xBE89_03BC, // s_mov_b32 s9, 60 (must not run)
+    0x88FE_0C7E, // s_or_b64 exec, exec, s[12:13]
+    0x7E04_0209, // v_mov_b32 v2, s9
+];
+
 fn target(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device) -> Option<Target> {
     let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
     // SAFETY: D3D12 fills the correctly sized OPTIONS1 structure.
@@ -192,5 +232,41 @@ fn in_half_lane_reads_match_console_on_d3d12_hardware() {
             })
             .collect();
         assert_eq!(out, want, "DPP row masks for {threads} threads");
+    }
+
+    // Only the Wave32 split needs console-flow lowering. Native Wave64
+    // adapters keep their original per-lane path.
+    if !target.runs(64) {
+        for threads in [64, 48, 32] {
+            let native = program(MASK_COUNT, threads);
+            let out = run(&host, target, &native, 2)
+                .unwrap_or_else(|error| panic!("mask ballot ({threads}): {error}"));
+            let count = threads.min(40);
+            let want: Vec<u32> = vec![count; (threads * 2) as usize];
+            assert_eq!(out, want, "whole-wave mask count for {threads} threads");
+        }
+
+        let native = program(CROSS_HALF_READ, 64);
+        let out = run(&host, target, &native, 2)
+            .unwrap_or_else(|error| panic!("cross-half v_readlane: {error}"));
+        assert_eq!(out, vec![40; 128], "v_readlane must reach lane 40");
+
+        let native = program(BRANCH_EXCHANGE, 64);
+        let out = run(&host, target, &native, 2)
+            .unwrap_or_else(|error| panic!("branch with one half inactive: {error}"));
+        let want: Vec<u32> = (0..2)
+            .flat_map(|_| (0..64).map(|lane| if lane < 20 { 10 } else { 1 }))
+            .collect();
+        assert_eq!(out, want, "exchange inside a uniform console-flow branch");
+
+        let native = program(READ_FIRST_LANE, 64);
+        let out = run(&host, target, &native, 2)
+            .unwrap_or_else(|error| panic!("cross-half readfirstlane: {error}"));
+        assert_eq!(out, vec![0; 128], "readfirstlane must select console lane zero");
+
+        let native = program(SAVEEXEC_SCC, 64);
+        let out = run(&host, target, &native, 2)
+            .unwrap_or_else(|error| panic!("saveexec SCC branch: {error}"));
+        assert_eq!(out, vec![42; 128], "SCC must test the new EXEC mask");
     }
 }
