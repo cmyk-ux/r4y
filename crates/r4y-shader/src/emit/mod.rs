@@ -520,7 +520,7 @@ pub fn emit_for(
         }
         _ => 0,
     };
-    let parts = |st, res| lower::Parts {
+    let parts = |st, res, console_cf| lower::Parts {
         native,
         p,
         st,
@@ -531,17 +531,33 @@ pub fn emit_for(
         prims: prims.clone(),
         mesh_stride,
         target,
+        console_cf,
     };
-    let l = match lower::lower(&parts(st, res)) {
+    let first = lower::lower(&parts(st, res, false));
+    let l = match first {
+        Err(ShaderError::Unsupported { what: lower::CONSOLE_FLOW, .. }) => {
+            // Re-structure as the console does: all lanes follow the same
+            // block sequence, while EXEC is retained as each instruction's
+            // vector guard. Only the bounded one-wave/no-LDS subset is sent
+            // through this path by Lower::new.
+            let console = structure::structure_console(p)?;
+            let resources = resource::track(
+                p,
+                &native.layout,
+                native.stage,
+                Some(&console),
+            )?;
+            lower::lower(&parts(&console, &resources, true))?
+        }
         // Discarded lanes kept on as helpers can read what no surviving
         // lane does (a register only killed lanes skipped writing); such a
         // program kills them as the console does (`structure::killing`).
         Err(_) if !st.discards.is_empty() => {
-            let st = structure::killing(p)?;
-            let res = resource::track(p, &native.layout, native.stage, Some(&st))?;
-            lower::lower(&parts(&st, &res))?
+            let killed = structure::killing(p)?;
+            let resources = resource::track(p, &native.layout, native.stage, Some(&killed))?;
+            lower::lower(&parts(&killed, &resources, false))?
         }
-        l => l?,
+        result => result?,
     };
     Ok(HostShader {
         stage: native.stage,
