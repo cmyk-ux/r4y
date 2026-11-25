@@ -517,3 +517,54 @@ The most recent source/CI configuration commit is `1c7cc18f45e4f8b02433b4df92ff2
 - GitHub also documents that PR events caused by a workflow using `GITHUB_TOKEN` do not normally start further runs: `opened`/`synchronize`/`reopened` may be created in an approval-required state, while other activity types (including `edited`) do not create a run. Source: [GITHUB_TOKEN event behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request).
 - The connected GitHub tool's token type is not exposed to this session, so do not state that this is the proven cause. It is a plausible explanation for why API-driven PR mutations did not yield a visible Actions run. The observed fact remains: no run/check is associated with the exact feature head.
 - Consequently, merely adding `edited` to the `pull_request` activity types would not reliably solve an automated-token trigger. The durable route is a dispatch-capable integration with Actions write permission, after the workflow-dispatch trigger is present on `main`, dispatching the feature ref and checking the exact SHA.
+
+
+## 9. Session continuation and AMD fork audit (2026-11-25, latest addendum)
+
+### Exact PR/branch state checked in this session
+
+- PR #16 remains open and unmerged: https://github.com/cmyk-ux/r4y/pull/16
+- Active branch: `feature/wave64-host-target`.
+- At the time this addendum was authored, the PR head was `fdd52680b45c50e8b670391b58b93887ea4213dd`. This is after the two documentation commits recorded below; the handoff update itself creates a subsequent documentation-only commit.
+- PR snapshot: 117 commits, 26 changed files, `mergeable=false`; the branch comparison was 115 ahead / 27 behind `main` before the two documentation commits. Recheck exact compare/head before any merge or rebase. Do not merge merely to generate CI.
+- Exact head `fdd52680b45c50e8b670391b58b93887ea4213dd`: `fetch_commit_workflow_runs` returned no workflow runs and combined commit status returned no statuses. Therefore this head has **no confirmed CI validation**. Recheck after this handoff-only commit as well.
+- The workflow branch contains the intended updated Tests step and a `workflow_dispatch` declaration, but `main` still lacks `workflow_dispatch`. The connected GitHub tool surface has no action to create/dispatch a new Actions run; it can only inspect and rerun existing runs. No new run can be created through the available integration in this session. Keep this as an explicit blocker; do not mark the branch green or ask the user to substitute a local build for CI.
+- PR being 27 commits behind and reported `mergeable=false` is a separate integration concern. Inspect the exact compare/conflict state before a rebase/merge; do not rewrite the branch blindly.
+
+### New external reference audit: Belobug/VIctory-Belobug-AMD
+
+Detailed code-level comparison and recommended R4Y tests are in [`.agent/VICTORY_AMD_FORK_AUDIT.md`](VICTORY_AMD_FORK_AUDIT.md). The reference watchlist was supplemented with a link, without changing the owner's four-repository priority order in [`.agent/REFERENCE_REPOS.md`](REFERENCE_REPOS.md).
+
+Audited AMD fork head: `4cbe9d76cf3c1fdca7f9a8d8364eacc33e7aa597`. The README says its base is upstream VIctory `8e79c80`; compare shows 492 commits ahead of that base. It is a substantial derivative and must not be wholesale merged/cherry-picked. Its status is self-reported on one RX 9070 XT / Windows 11 system: 3–5 FPS, world rendering visible, not playable, no NVIDIA/Intel testing; moving vehicles and some compute/ray-tracing work remain broken.
+
+Highest-priority finding:
+- R4Y's current indirect clamp mutates the original title argument shadow and does not pass the optional `ExecuteIndirect` count into the pre-clamp helper.
+- The AMD fork reads source arguments separately, writes bounded records to a device-local scratch output, clamps only `min(max,count)`, and uses bounded compare-exchange/saturating budget logic.
+- It later hoists clamp operations before a run of indirect draws, but does so only while the producer-write counter says the source arguments remain unchanged. Earlier less-ordered modes caused visible flicker; mode 7 (sequential clamps with explicit barrier) became the default.
+- Recommended order: write tests for source immutability/count/state/lifetime/budget first; implement an R4Y-native scratch clamp; only then investigate hoisting with producer-write invalidation and conservative ordering. Performance figures in the fork are not R4Y results.
+
+Secondary shader finding:
+- R4Y's current `helpers_read` predicate requires a pixel shader with discard; the fork uses quad reads for all pixel quad-local reads because wave reads excluded helper values on its AMD driver.
+- R4Y's `v_readfirstlane_b32` has no equivalent of the fork's helper-lane-own-value special case. This may affect waterfall descriptor loops and derivative-dependent texture coordinates.
+- Add narrow fixtures and validate with DXIL validation, WARP and the RTX 3070 before changing the translator. Do not assume AMD failure behavior is present on NVIDIA.
+
+Other audit conclusions:
+- The fork's constant ambient and no-wind shader swaps are visual workarounds, not general fixes.
+- Its per-command GPU timing, bounded target-memory peeks and shader patch/swap switches are useful diagnostic patterns; R4Y already has timestamp facilities, so compare/extend existing code before duplicating.
+- PortWatch's current milestone method places "world loads and renders, however broken" at 40% and "playable / control a character" at 50%; quality tracks only count after Playable. The captured tracker snapshot refreshed at `2026-11-25T10:22:39.836Z` contained neither `Belobug` nor `VIctory-Belobug-AMD`. Do not say the fork has an official PortWatch score.
+- No R4Y production code was changed as part of this external audit. It is research/documentation only.
+
+### Documentation commits
+
+- `d0910d1153a7cb96b747402d899a1340befc2cb6` — add `.agent/VICTORY_AMD_FORK_AUDIT.md`.
+- `fdd52680b45c50e8b670391b58b93887ea4213dd` — add the supplemental reference entry to `.agent/REFERENCE_REPOS.md`.
+- The current handoff append is being committed after these. Verify the resulting PR head and query Actions again; do not assume a docs commit triggered CI.
+
+### Next actions — precedence over stale earlier notes above
+
+1. Re-read current PR head, compare to `main`, inspect workflow file on both refs and query exact-head Actions/checks. The latest checked head had zero runs/checks.
+2. Obtain a dispatch-capable Actions mechanism (workflow-dispatch must also exist on default branch and the dispatch must target `feature/wave64-host-target`). The current GitHub connector does not expose it. Until an actual run is created, do not claim CI success.
+3. Once CI runs, inspect all steps/logs, especially shader stride tests, gather regression, workspace tests, Clippy (normal and all-features), diagnostics build and release build. The structured-buffer lowering prototype commit `004cfac5d87904ba1fc63d0b0fe4f02ea5643a14` is still unverified; do not call it fixed.
+4. Do not ask the user to repeat the local suite simply to compensate for missing CI. After CI and source-level failures are resolved, request only the hardware evidence that CI cannot provide (RTX 3070 D3D12 dispatch and affected-title A/B).
+5. Queue the indirect scratch/count correctness redesign from the AMD audit as a focused R4Y-native work item; do not implement clamp hoisting before correctness tests and source-write ordering are sound.
+6. Add helper-lane/quad and helper `v_readfirstlane` shader fixtures as a separate targeted investigation. Keep this distinct from the Wave64 compute split and GTA VI runtime watchdog.
