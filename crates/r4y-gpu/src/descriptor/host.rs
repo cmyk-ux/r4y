@@ -982,16 +982,23 @@ fn fits(texture: &ID3D12Resource, castable: &[u32], mut format: Option<&mut DXGI
         format.0 = linear as i32;
     }
     let view = format.as_ref().map_or(0, |f| f.0 as u32);
+    if unordered {
+        let uav_format = if view == 0 { own } else { view };
+        if !typed_store(uav_format) {
+            once!(
+                format = uav_format,
+                own,
+                "an unordered view in a format the host cannot store"
+            );
+            return false;
+        }
+    }
     if view == 0 {
         return !typeless;
     }
     let cast = castable.contains(&view);
     if family(view) != family(own) && !cast {
         once!(view, own, "view format of another family");
-        return false;
-    }
-    if cast && family(view) != family(own) && unordered && !typed_store(view) {
-        once!(view, own, "an unordered view in a format the host cannot store");
         return false;
     }
     if let Some(format) = format
@@ -1017,31 +1024,9 @@ fn default_view(resource: crate::object::This) -> bool {
     other.is_none()
 }
 
-/// Whether the host stores to typed unordered views of `format`.
+/// Whether the host can perform typed UAV stores in this format.
 fn typed_store(format: u32) -> bool {
-    static KNOWN: Mutex<Vec<(u32, bool)>> = Mutex::new(Vec::new());
-    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(&(_, ok)) = known.iter().find(|(f, _)| *f == format) {
-        return ok;
-    }
-    let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
-        Format: DXGI_FORMAT(format as i32),
-        ..Default::default()
-    };
-    let ok = host().is_some_and(|h| {
-        // SAFETY: a plain query into a struct of its size.
-        unsafe {
-            h.device.CheckFeatureSupport(
-                D3D12_FEATURE_FORMAT_SUPPORT,
-                (&raw mut support).cast(),
-                size_of_val(&support) as u32,
-            )
-        }
-        .is_ok()
-            && support.Support1.0 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0 != 0
-    });
-    known.push((format, ok));
-    ok
+    crate::resource::typed_store_supported(format)
 }
 
 /// Makes the host descriptor for `view` at `at` (in any host view heap):
