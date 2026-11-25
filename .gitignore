@@ -12,7 +12,7 @@
 /tests/fixtures/*/target/
 
 # Local configuration (contains paths to YOUR files)
-/victory.toml
+/r4y.toml
 
 # Places people tend to drop data into. Keep data outside the repo instead.
 /game/
@@ -46,7 +46,7 @@
 # Typical game data (non-exhaustive on purpose; the policy check is an allowlist)
 *.bin
 # The one exception (docs/asset-policy.md): the BCPack format's constant tables.
-!/crates/victory-formats/src/bcpack-tables.bin
+!/crates/r4y-formats/src/bcpack-tables.bin
 *.dat
 *.pak
 *.rpf
@@ -81,8 +81,5 @@ Thumbs.db
 /bin/
 /build/
 /config/
-/r4y.toml
-/victory.toml
-/r4y-run.cmd
 /r4y.log
 *.log

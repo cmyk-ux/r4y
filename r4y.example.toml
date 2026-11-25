@@ -1,7 +1,7 @@
 # Copy to %LOCALAPPDATA%\R4Y\r4y.toml, then edit the paths.
 # All paths must be outside the R4Y source repository.
-# Environment variables take precedence over this file. R4Y_CONFIG selects
-# a different file; VICTORY_CONFIG is accepted as a legacy alias.
+# Environment variables take precedence over this file.
+# R4Y_CONFIG selects a different configuration file.
 
 [paths]
 # Your own copy of the game, already readable on disk.

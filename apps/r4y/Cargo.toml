@@ -1,0 +1,36 @@
+[package]
+name = "r4y"
+description = "R4Y command-line front end: inspect, census, translate and run."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+r4y-core.workspace = true
+r4y-pe.workspace = true
+r4y-loader.workspace = true
+r4y-hle.workspace = true
+r4y-gpu.workspace = true
+r4y-shader = { workspace = true, features = ["host"] }
+r4y-game.workspace = true
+anyhow.workspace = true
+blake3.workspace = true
+memchr.workspace = true
+clap.workspace = true
+walkdir.workspace = true
+tracing.workspace = true
+
+[features]
+# Debug-level logs and the debugging switches (frame capture, stack dumps,
+# the host debug layer, scripted keys). Off in a plain release build.
+diagnostics = [
+    "r4y-core/diagnostics",
+    "r4y-hle/diagnostics",
+    "r4y-loader/diagnostics",
+    "r4y-shader/diagnostics",
+]
+
+[lints]
+workspace = true

@@ -1,6 +1,6 @@
 ## What changed?
 
-<!-- Describe the problem and intended behavior. -->
+<!-- Describe the problem, the intended behavior and the implementation. -->
 
 ## Subsystem
 
@@ -13,11 +13,9 @@
 - [ ] Cache / pipeline
 - [ ] Tests / tooling / documentation
 
-## Motivation and provenance
+## Motivation
 
-**Related issue/PR:**
-
-**Adapted from source commit or PR (if applicable):**
+**Related R4Y issue or reproducible report:**
 
 **R4Y base commit:**
 

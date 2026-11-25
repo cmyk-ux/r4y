@@ -1,5 +1,1 @@
-This marker identifies the root of the R4Y source tree.
-
-Tools refuse to write game-derived output (caches, converted assets, prepared
-images or logs containing game data) anywhere below this directory. See
-docs/asset-policy.md.
+This marker identifies the R4Y source tree.
