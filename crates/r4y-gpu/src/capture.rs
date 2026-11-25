@@ -424,8 +424,8 @@ fn peek(when: &str) {
 }
 
 /// In a listed frame: copies an indirect execution's records (`args`:
-/// buffer, offset; in the indirect-argument state) and its count (also in
-/// the indirect-argument state) to readback memory,
+/// buffer, offset; in the indirect-argument state) and its count (in the
+/// exact read-state combination tracked for ExecuteIndirect) to readback memory,
 /// logged once the list has run: how many records ask for work, and the
 /// first ones.
 pub(crate) fn read_indirect(
