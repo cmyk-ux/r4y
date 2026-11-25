@@ -372,14 +372,11 @@ mod tests {
         ];
         let (source, source_data) = host.shared_buffer(bytes).unwrap();
         let (count, count_data) = host.shared_buffer(256).unwrap();
-        let (budget, budget_data) = host.shared_buffer(256).unwrap();
         // SAFETY: these are the mapped pointers returned by shared_buffer.
         unsafe {
             std::ptr::copy_nonoverlapping(source_words.as_ptr(), source_data.cast(), source_words.len());
             count_data.cast::<u32>().write(1);
-            budget_data.cast::<u32>().write(0);
         }
-        let dst = host.uav_buffer(bytes).unwrap();
         let (upload, upload_data) = host.upload_buffer(bytes).unwrap();
         // SAFETY: upload_data is the mapped upload buffer returned above.
         unsafe {
@@ -417,12 +414,12 @@ mod tests {
         let readback = readback.unwrap();
         let list = host.new_list().unwrap();
         list.keep(&readback);
-        // SAFETY: all three resources are live D3D12 buffers.
+
+        // Inputs are read by the helper as ByteAddressBuffer SRVs.
+        // SAFETY: all resources are live D3D12 buffers.
         let source_gpu = unsafe { source.GetGPUVirtualAddress() };
         // SAFETY: the count buffer is live.
         let count_gpu = unsafe { count.GetGPUVirtualAddress() };
-        // SAFETY: the budget buffer is live.
-        let budget_gpu = unsafe { budget.GetGPUVirtualAddress() };
         let source_to_read = crate::host::transition(
             &source,
             D3D12_RESOURCE_STATE_COMMON,
@@ -433,19 +430,18 @@ mod tests {
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         );
-        let budget_to_uav = crate::host::transition(
-            &budget,
-            D3D12_RESOURCE_STATE_COMMON,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-        );
-        let dst_to_copy = crate::host::transition(
-            &dst,
-            D3D12_RESOURCE_STATE_COMMON,
-            D3D12_RESOURCE_STATE_COPY_DEST,
-        );
+        // These two helpers also record their production state transitions:
+        // the budget is cleared before each submission; scratch is reused.
+        let budget_gpu = list.budget().unwrap();
+        let dst = list.indirect_scratch(bytes).unwrap();
         // SAFETY: the command list is open and all resources are alive.
         unsafe {
-            list.list.ResourceBarrier(&[source_to_read, count_to_read, budget_to_uav, dst_to_copy]);
+            list.list.ResourceBarrier(&[source_to_read, count_to_read]);
+            list.list.ResourceBarrier(&[crate::host::transition(
+                &dst,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+            )]);
             list.list.CopyBufferRegion(&dst, 0, &upload, 0, bytes);
             list.list.ResourceBarrier(&[crate::host::transition(
                 &dst,
@@ -453,6 +449,7 @@ mod tests {
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             )]);
         }
+
         let clamp = super::make_for(&host.device).unwrap();
         assert!(super::record_clamp(
             &clamp,
@@ -463,15 +460,35 @@ mod tests {
             Some(count_gpu),
             (0, 16, 3),
         ));
-        // Copy the result to readback after the clamp's UAV writes.
+        list.indirect_ready();
+
+        // Read back the output after the helper writes; restore the tracked
+        // indirect state so HostList::close can return the scratch to COMMON.
         // SAFETY: ordered transitions and copies in one open command list.
         unsafe {
             list.list.ResourceBarrier(&[crate::host::transition(
                 &dst,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
             )]);
             list.list.CopyBufferRegion(&readback, 0, &dst, 0, bytes);
+            list.list.ResourceBarrier(&[crate::host::transition(
+                &dst,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            )]);
+            list.list.ResourceBarrier(&[
+                crate::host::transition(
+                    &source,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COMMON,
+                ),
+                crate::host::transition(
+                    &count,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COMMON,
+                ),
+            ]);
         }
         list.close();
         host.execute(&[&list]);
