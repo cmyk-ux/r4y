@@ -34,6 +34,12 @@ const MASK_COUNT: &[u32] = &[
     0x7E04_0209, // v_mov_b32 v2, s9
 ];
 
+const MBCNT_LOW: &[u32] = &[
+    0xD765_0001,
+    0x0001_00C1, // v_mbcnt_lo_u32_b32 v1, -1, 0
+    0x7E04_0201, // v_mov_b32 v2, v1
+];
+
 const CROSS_HALF_READ: &[u32] = &[
     0xD760_0009,
     0x0001_5100, // v_readlane_b32 s9, v0, 40
@@ -263,6 +269,14 @@ fn wave64_split_matches_console_on_d3d12_hardware() {
             let want: Vec<u32> = vec![count; (threads * 2) as usize];
             assert_eq!(out, want, "whole-wave mask count for {threads} threads");
         }
+
+        let native = program(MBCNT_LOW, 64);
+        let out = run(&host, target, &native, 2)
+            .unwrap_or_else(|error| panic!("console v_mbcnt lane index: {error}"));
+        let want: Vec<u32> = (0..2)
+            .flat_map(|_| (0..64).map(|lane| lane.min(32)))
+            .collect();
+        assert_eq!(out, want, "v_mbcnt must count the low console mask across both halves");
 
         let native = program(CROSS_HALF_READ, 64);
         let out = run(&host, target, &native, 2)
