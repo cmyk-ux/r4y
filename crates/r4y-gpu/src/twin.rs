@@ -295,7 +295,18 @@ pub(crate) fn route(list: &HostList, depth: &Arc<HostTexture>, twin: &Twin, want
     let side = if wanted & UNORDERED_ACCESS != 0 { TWIN } else { DEPTH };
     let writes = side == TWIN || wanted & (DEPTH_WRITE | RENDER_TARGET | COPY_DEST | RESOLVE_DEST) != 0;
     if let Some(to_depth) = list.twin_use(depth, side, writes)
-        && twin.copy(&list.list, depth, to_depth, &mut |t, w| list.move_texture(t, w))
+        && twin.copy(
+            &list.list,
+            depth,
+            to_depth,
+            &mut |t, w| list.move_texture(t, w),
+            &mut |what| {
+                #[cfg(feature = "diagnostics")]
+                list.note_op(|| what);
+                #[cfg(not(feature = "diagnostics"))]
+                let _ = what;
+            },
+        )
     {
         list.need_rebind();
     }
@@ -445,9 +456,9 @@ impl Twin {
                         r.depth_sub,
                         t.Width,
                         t.Height,
-                        d.Format.0,
+                        d.Footprint.Format.0,
                         t.RowPitch,
-                        d.RowPitch,
+                        d.Footprint.RowPitch,
                     ));
                     l.Dispatch(t.Width.div_ceil(2).div_ceil(64), t.Height, 1);
                 }
