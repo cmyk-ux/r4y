@@ -6,7 +6,7 @@
 >
 > **Visibility:** this file is committed to the repository. It is not private or access-controlled; anyone with repository access can read it.
 
-Last updated: 2026-11-25 (America/Sao_Paulo)
+Last updated: 2026-11-25 (America/Sao_Paulo); PR #16 Wave64 work in progress
 Repository: https://github.com/cmyk-ux/r4y
 Primary checkout used by the user: `C:\Users\dysu\Downloads\r4y\r4y`
 Current investigation: GTA VI runtime on NVIDIA GeForce RTX 3070 / D3D12.
@@ -151,13 +151,32 @@ Upstream research:
 - The inspected PR was open and marked non-mergeable/draft state was false at the time. It is not a drop-in patch: it has explicit limitations (e.g. some >64-thread cross-lane groups, LDS cases, whole-wave sections and cross-half permute operations) and has undergone continuing changes.
 - R4Y diverged from upstream and has renamed crates/files. Rebase/port semantically, not mechanically.
 
+Current implementation is in PR #16:
+https://github.com/cmyk-ux/r4y/pull/16
+
+Branch: `feature/wave64-host-target`
+Latest commit at this handoff update: `b27b7354e9efe395040f9659a210411558d6d024`
+
+Implemented on that branch:
+- `crates/r4y-gpu/src/host.rs` queries D3D12 OPTIONS1 once at device initialization and stores the adapter's `WaveLaneCountMin/Max` in `Host::wave_target`.
+- `crates/r4y-shader/src/emit/mod.rs` adds `Target`, `translate_for` and `emit_for`. Existing `translate`/`emit` APIs remain wrappers using `Target::ANY`.
+- `crates/r4y-gpu/src/shader_cache.rs` includes the host wave range in the BLAKE3 cache fingerprint and translates using that same target.
+- `crates/r4y-shader/src/emit/lower.rs` explicitly refuses a declared wave size unsupported by the host. It also has a conservative in-half wave64-to-wave32 split for compute shaders using DPP and/or `ds_swizzle`, where no LDS, whole-wave operation, mask-as-data, `v_readfirstlane`, or whole-wave section is present. It remaps DPP row-mask lookup for the upper 32 lanes and reconstructs console flattened thread IDs.
+- `crates/r4y-shader/src/emit/mod.rs` adds GPU-independent tests for host wave range handling, refusal of cross-lane wave64 reads on a 32-lane host, native wave64 behavior on 32..64 targets, and DXIL WaveSize=32 for in-half splits.
+- `crates/r4y-shader/src/emit/split_tests.rs` adds a D3D12 dispatch test. It compares every result against console lane order for 32/64/128 threads per group, plus a partial DPP row mask that distinguishes console rows 0/1 from rows 2/3. It skips only when no SM 6.6 D3D12 adapter or no usable wave32/wave64 range is available. The raw UAV test descriptor must be paired with `View::Pair` so the helper allocates both adjacent descriptors.
+
+Deliberate current limitations:
+- This is only the in-half subset. It does not implement upstream PR #233's broader console-flow path with group-shared cross-half exchange, ballots, and execution-mask emulation.
+- Cross-half read/write-lane, permute, lane-mask-as-data, readfirstlane and LDS-sharing cases are not split; where they require wave64 they are refused on 32-lane hosts.
+- The D3D12 lane-by-lane test has been added but has not yet been confirmed on the user's RTX 3070. Passing CI is not proof that the user's adapter executed it; inspect test output/skip reason.
+- Last observed GitHub Actions run for this branch was run 85 on commit `b27b735`, still in progress at the time this handoff text was drafted. Check the latest run for the PR head rather than relying on this stale status.
+
 Next engineering task:
-1. Inspect the exact current main translation API, host feature probe and shader cache fingerprint.
-2. Make the host wave range (NVIDIA 32..32 vs AMD 32..64, etc.) part of shader translation and cache keys.
-3. Port the appropriate split-wave lowering and explicit refusals for unsupported patterns, rather than emitting DXIL requiring wave64 on NVIDIA.
-4. Keep native wave64 behavior unchanged on hosts that support it.
-5. Add GPU-independent IR/lowering tests and hardware tests; ensure Windows CI does not mistake WARP's nonstandard wave size for a normal 32-lane adapter.
-6. Measure the game's actual refused/dropped pipelines after the fix; a lower warning count alone is insufficient.
+1. Get a completed CI run on the current PR head; fix compile, Clippy or test failures before expanding scope.
+2. Confirm the D3D12 lane-by-lane test actually runs on a wave32 adapter. On the user's RTX 3070, compare its output for IN_HALF and partial DPP row masks; do not treat a skipped test as validation.
+3. Once the conservative split is correct, extend the implementation toward the upstream console-flow path only with explicit tests for cross-half lane reads, ballot/mask values, divergent branches and loop behavior. Preserve refusal for unsupported patterns.
+4. Re-run the GTA VI diagnostics and compare the previously observed refused compute pipeline hashes. Distinguish fixed shader translations from unrelated failures.
+5. Then resume the slot-zero SRV dimension investigation and issue #4 descriptor virtualization.
 
 ### 4.4 The failed hash extraction
 
