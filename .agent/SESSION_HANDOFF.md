@@ -762,3 +762,47 @@ The old R4Y clamp wrote directly into the title's argument shadow and processed 
 2. If CI fails, fix the exact failures before adding a new subsystem.
 3. If hosted CI has no usable D3D12 adapter, retain the HLSL compiler test as hosted coverage and run the dispatch test on a D3D12 host/WARP-capable environment; do not represent a skipped GPU test as executed.
 4. After the clamp has passed, continue to the next runtime blocker from the existing Wave64 handoff. Keep the AMD helper-lane investigation separate until the affected title/runtime or focused shader fixtures justify it.
+
+
+## 13. Latest successful CI and dynamic heap-stride correction (2026-11-25)
+
+This section supersedes older CI/branch status snapshots above.
+
+### Exact validation
+
+- Code commit validated by CI: `4117c0c3695560f94e57a455d907d38e1bee78ca`.
+- Actions run #186: https://github.com/cmyk-ux/r4y/actions/runs/45616192308
+- Run conclusion: **success** on that exact head SHA.
+- PR #16 remained open and mergeable; branch was 166 commits ahead and 0 behind `main` at the last compare before the comment-only follow-up.
+- Clippy `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
+- All-features diagnostics Clippy `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`: passed.
+- Release build `cargo build --release --locked -p r4y`: passed.
+- Workspace tests: **214 passed, 0 failed, 2 ignored**, with 2 architecture-specific tests filtered from the general workspace invocation.
+- In particular, these passed in the WARP-only hosted path (`R4Y_D3D12_WARP=1`):
+  - `emit::stride_tests::a_heap_buffer_read_by_element_takes_the_views_stride`
+  - `emit::synthetic_tests::gathers_at_a_level_match_the_hardware`
+- The previously failing dynamic structured-heap stride test was the only failure in run #185; it now passes on WARP.
+
+### D3D12 Wave64 limitation in the hosted runner
+
+The separate step `Verify wave64 split and console flow on D3D12 hardware` completed with process/test success, but the test output explicitly said:
+
+```text
+adapter supports neither 32- nor 64-lane waves; skipped
+```
+
+Therefore this run does **not** validate the lane-by-lane Wave64 D3D12 test on a capable adapter. Do not represent the skipped test as a Wave64 hardware pass. The code path remains covered by the unit/translation tests; a capable device test is still needed on the RTX 3070 or another D3D12 adapter that reports 32/64 wave capabilities.
+
+### Why the dynamic heap stride fix works
+
+- Before the latest fix, resource-heap buffer loads with no static `UsedResource` entry loaded the runtime per-slot `VIEW_STRIDES` value, calculated `index * stride + offset`, but then emitted a StructuredBuffer handle with `StructStrideInBytes=0`. WARP returned the same fixed element for every lane (`200, 200, ...`) instead of `200..231`.
+- Commit `4117c0c3695560f94e57a455d907d38e1bee78ca` now leaves `structured_stride` unset for this dynamic case. The byte offset already includes the runtime stride, so the operation uses RawBuffer byte-offset coordinates. Static structured resources with a compile-time `UsedResource.stride` keep their StructuredBuffer path.
+- This resolved the WARP regression without changing the host descriptor mirror or adding a second descriptor heap.
+- The source comment was clarified in comment-only commit `859ffc5b87144e9b0baf338966c56b4b8d2f9e21`; it now describes dynamic stride conversion to byte offsets and RawBuffer coordinates.
+
+### Next steps
+
+1. Re-check current branch head and Actions after this handoff/comment-only update. The full #186 result applies to code head `4117c0c...`; later changes are documentation/comment-only until proven otherwise.
+2. Continue runtime blocker triage using the already-recorded crash-context findings in section 10: title-side access violation is a write to null/unmapped address at `r4y-image-...+0x23cf683`; memory pressure was high but is not proven causal. Obtain or inspect the adjacent register/unwind frames from the exact `crashes.log` report before assigning a subsystem.
+3. Do not return to clamp hoisting yet. Scratch/count correctness, WARP, Clippy, diagnostics and release builds have passed; real title GPU timing and RTX 3070 A/B are still needed before performance changes.
+4. Keep the AMD helper-lane/quad semantics audit as a separate item. Do not implement a broad helper-lane change solely on the AMD report; create focused tests and establish a failing NVIDIA/title case first.
