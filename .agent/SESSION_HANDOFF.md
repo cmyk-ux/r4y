@@ -6,7 +6,7 @@
 >
 > **Visibility:** this file is committed to the repository. It is not private or access-controlled; anyone with repository access can read it.
 
-Last updated: 2026-11-25 (America/Sao_Paulo); PR #16 Wave64 work in progress
+Last updated: 2026-11-25 (America/Sao_Paulo); PR #16 CI green, D3D12 hardware test skipped on hosted runner
 Repository: https://github.com/cmyk-ux/r4y
 Primary checkout used by the user: `C:\Users\dysu\Downloads\r4y\r4y`
 Current investigation: GTA VI runtime on NVIDIA GeForce RTX 3070 / D3D12.
@@ -155,7 +155,16 @@ Current implementation is in PR #16:
 https://github.com/cmyk-ux/r4y/pull/16
 
 Branch: `feature/wave64-host-target`
-Latest commit at this handoff update: `b27b7354e9efe395040f9659a210411558d6d024`
+Latest validated code commit: `1a1e97aa5f4c65b516f65abed444012bafc062fb`
+Latest CI run: #97 — https://github.com/cmyk-ux/r4y/actions/runs/45564018282
+
+CI #97 completed successfully:
+- Clippy, including all features: pass.
+- Release build: pass.
+- Workspace tests: 211 passed, 0 failed, 2 ignored, 3 filtered out.
+- Dedicated D3D12 in-half test: command succeeded, but the test explicitly skipped because the GitHub hosted runner reported no usable 32- or 64-lane wave range (`adapter supports neither 32- nor 64-lane waves; skipped`). This is not hardware validation.
+
+The branch has later documentation updates only if the branch HEAD differs from this code commit; always check the PR head and latest CI before relying on the commit/status above.
 
 Implemented on that branch:
 - `crates/r4y-gpu/src/host.rs` queries D3D12 OPTIONS1 once at device initialization and stores the adapter's `WaveLaneCountMin/Max` in `Host::wave_target`.
@@ -169,13 +178,17 @@ Deliberate current limitations:
 - This is only the in-half subset. It does not implement upstream PR #233's broader console-flow path with group-shared cross-half exchange, ballots, and execution-mask emulation.
 - Cross-half read/write-lane, permute, lane-mask-as-data, readfirstlane and LDS-sharing cases are not split; where they require wave64 they are refused on 32-lane hosts.
 - The D3D12 lane-by-lane test has been added but has not yet been confirmed on the user's RTX 3070. Passing CI is not proof that the user's adapter executed it; inspect test output/skip reason.
+- The D3D12 test host helper now queries OPTIONS1 and exposes the wave range. GPU semantic/VALU tests check the fixed WaveSize declared in PSV0 and skip only adapters that cannot create that shader; the skip is printed. The production host uses `Target::NONE` (not `ANY`) when WaveOps/range cannot be queried, so a fixed-wave shader is refused at translation rather than risking a bad PSO.
+- The waterfall exception is deliberate: `v_readfirstlane_b32` whose result is traced as `x.res.waterfall.reads` is restored per lane by the existing lowering and must not trigger the whole-wave requirement. A real `v_readfirstlane` still does.
+- CI #97's general test summary: 211 passed, 0 failed, 2 ignored, 3 filtered out. The standalone D3D12 lane-by-lane command passed as a test but skipped its body on the hosted runner because D3D12 OPTIONS1 reported neither wave32 nor wave64. The RTX 3070 run is still required.
+- The partial DPP row-mask test preserves sentinel value 1 in lanes excluded by row_mask 0x3. Its encoded DPP instruction is a two-dword VOP_DPP (the preceding `0x7E04_02FA` is part of the instruction, not a separate instruction).
 - Last observed GitHub Actions run for this branch was run 85 on commit `b27b735`, still in progress at the time this handoff text was drafted. Check the latest run for the PR head rather than relying on this stale status.
 
 Next engineering task:
-1. Get a completed CI run on the current PR head; fix compile, Clippy or test failures before expanding scope.
-2. Confirm the D3D12 lane-by-lane test actually runs on a wave32 adapter. On the user's RTX 3070, compare its output for IN_HALF and partial DPP row masks; do not treat a skipped test as validation.
-3. Once the conservative split is correct, extend the implementation toward the upstream console-flow path only with explicit tests for cross-half lane reads, ballot/mask values, divergent branches and loop behavior. Preserve refusal for unsupported patterns.
-4. Re-run the GTA VI diagnostics and compare the previously observed refused compute pipeline hashes. Distinguish fixed shader translations from unrelated failures.
+1. Run the D3D12 lane-by-lane test on the user's RTX 3070 (the hosted runner skipped because it had no usable 32/64 wave range). It must report exact results for 32, 64 and 128 threads per group and pass the partial DPP row-mask assertions.
+2. Build the R4Y release on that machine and rerun the GTA VI diagnostics. Confirm the startup log reports `host wave sizes lanes_min=32 lanes_max=32`; compare refused/dropped hashes `13dfdd3b1136e407` and `88994c3496045f51`. The current in-half subset will not fix shaders that need cross-half communication; those should now fail during translation with a descriptive reason instead of PSO creation.
+3. Once in-half behavior is verified, implement the upstream console-flow subset for groups up to 64 threads: cross-half exchange through groupshared memory, ballots/masks, readlane/readfirstlane/writelane/mbcnt, and divergent branches/loops. Explicitly exclude LDS, ds_(b)permute, multi-console-wave groups and whole-wave sections until separately implemented and tested.
+4. Re-run the GTA VI diagnostics and compare fixed, refused and newly-created pipelines. Do not infer correctness from fewer warnings alone.
 5. Then resume the slot-zero SRV dimension investigation and issue #4 descriptor virtualization.
 
 ### 4.4 The failed hash extraction
