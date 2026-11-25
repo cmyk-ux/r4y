@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(super::validate_layout((2, 12, 0), 0x1000, None), Some(0));
         assert_eq!(
             super::validate_layout((0, 16, 65_535 * 64), 0x1000, None),
-            Some(u64::from(16 * 65_535 * 64)),
+            Some(16u64 * 65_535 * 64),
         );
         assert_eq!(
             super::validate_layout((0, 16, 65_535 * 64 + 1), 0x1000, None),
