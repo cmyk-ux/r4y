@@ -6,7 +6,7 @@
 >
 > **Visibility:** this file is committed to the repository. It is not private or access-controlled; anyone with repository access can read it.
 
-Last updated: 2026-11-25 (America/Sao_Paulo); RTX 3070 MBCNT classification correction committed; hardware rerun pending
+Last updated: 2026-11-25 (America/Sao_Paulo); installer duplicate-tail fix committed to main and PR #16; CI #165 passed (hosted Wave64 step skipped)
 Repository: https://github.com/cmyk-ux/r4y
 Primary checkout used by the user: `C:\Users\dysu\Downloads\r4y\r4y`
 Current investigation: GTA VI runtime on NVIDIA GeForce RTX 3070 / D3D12.
@@ -363,28 +363,228 @@ The disabled run may lose rendering/features because those shaders are intention
 
 ## 5. Immediate priority order
 
-1. Get CI green for the exact current feature head and run the targeted shader/workspace tests; the new changes are not yet validated.
-2. Run the controlled `R4Y_WAVE64_CONSOLE_FLOW=0` A/B on the RTX 3070 and correlate refused pipelines with the title watchdog / D3D12 device-removal events.
-3. Depending on the A/B, fix cross-half exchange/control-flow or isolate in-half split-Wave64 dispatches. Do not copy an upstream shader hash as if it were R4Y's.
-4. Exercise the shared-texture allocation-info fix against the old `B5G5R5A1_UNORM` debug-layer failure; verify the larger NVIDIA pipeline-worker stack under actual PSO compilation.
-5. Investigate slot-zero Texture1D/Texture2D mismatch with source-to-host descriptor provenance.
-6. Design actual descriptor virtualization for the 1,245,184 logical title slots on a 1,000,000 physical NVIDIA heap; do not confuse warning-rate limiting/safe null clamping with preservation.
-7. Re-run without GPU-Based Validation for representative performance, then perform focused GBV/DRED checks for correctness.
-8. Revisit upstream watchlist commits/issues/PRs in the priority order documented in `.agent/REFERENCE_REPOS.md`; record relevant changes and test evidence here.
+1. Fix host-wave awareness and wave64 compute handling; it directly explains rejected pipelines and dropped dispatches.
+2. Investigate slot-zero Texture1D/Texture2D mismatch with source-to-host descriptor provenance.
+3. Design actual descriptor virtualization for the 1,245,184 logical title slots on a 1,000,000 physical NVIDIA heap; do not confuse warning-rate limiting/safe null clamping with preservation.
+4. Re-run without GPU-Based Validation for representative performance, then perform focused GBV/DRED checks for correctness.
+5. Keep issue/PR state and test evidence updated in this file.
 
 ## 6. How to resume in a new chat
 
 User can say: **"Confira o arquivo .agent/SESSION_HANDOFF.md no repo cmyk-ux/r4y e continue."**
 
 At session start:
-1. Identify the branch the user is actively testing; read this handoff from that branch, not blindly from the default branch.
-2. Read `.agent/REFERENCE_REPOS.md` and preserve its requested priority order: Zettrox/ztrx, Marvisak/VIctory, fxceless/victory-fork, xcl-dev/xcl.
-3. Inspect the current branch head, diff, CI, open PRs/issues and relevant upstream changes before editing.
-4. Check whether the findings above have been resolved or superseded by newer code.
-5. Continue implementation; do not ask the user to re-explain the project or repeat known diagnostic results.
-6. Update both files when reference findings, code, test evidence or next steps change.
+1. Read this file from the current default branch.
+2. Inspect the latest commits, open PRs/issues and current working branch before editing.
+3. Check whether the findings above have been resolved or superseded by newer code.
+4. Continue implementation; do not ask the user to re-explain the project.
+5. Update this file when technical state changes, including commit/PR IDs, exact tests, limitations and next steps.
 
 Do not put game assets, proprietary title data, shader dumps, keys, credentials, or machine-specific sensitive information in Git. The log hashes above are diagnostic shader identifiers supplied for this investigation; do not add shader binaries, disassembly, or title-derived material.
+
+
+## 7. Installer CI triage (2026-11-25)
+
+The user resumed from the "Corrigir teste DPP" session and asked to continue with installer CI failures #162/#163.
+
+### Confirmed root cause
+
+- The valid installer body in `scripts/install.ps1` ended at its first `exit $exitCode` (about line 580).
+- A stale, malformed 186-line tail had been appended after that exit. It began with the orphaned fragment `-and [int]$choice -ge 1 ...`, then repeated the remainder of `Select-Game`, duplicated `ConvertTo-TomlString`, `Write-Config`, `Build-R4Y`, `Invoke-Setup`, `Write-Launcher`, and appended a second main `try/catch`/exit block.
+- The generic executable selection change itself is valid in the retained body: it auto-selects exactly one top-level `.exe`, prompts for a numeric choice when there are multiple candidates, falls back to the file picker/manual path, and validates extension and containment within the selected folder.
+- CI #163 (run 45581923697) checked out merge commit `9bdd0cfc950da9674364f7d368c1d4895f60c8d7`; the first installer validation step failed during PowerShell parsing with unexpected `)` and `}` tokens. Dry-run, MSVC, native stderr, Rust setup, Clippy, build, tests and the D3D12 hardware step were all skipped.
+- CI #161 (run 45581816240, parent installer revision) failed at the same first step with a larger set of parser errors, including the prompt string and CMD launcher text being parsed as malformed PowerShell. This predates #163.
+- The GitHub Actions connector used here returns commit-associated runs filtered to pull-request events. It surfaced #161 and #163, but did not expose the user's referenced #162 push run; do not invent its run ID or conclusion. Check the Actions UI if its exact record is needed.
+
+### Fix applied
+
+- Commit `128e3d135799304390676a8667247088e900675d` on `main`: `fix(installer): remove stale duplicated script tail`.
+- Commit `a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa` on `feature/wave64-host-target` (PR #16): same fix.
+- Both branches now have the same `scripts/install.ps1` blob SHA `8bcb58005d94fd4c91ae9d454ae827037c409f9e`; file is 580 lines, with one `Select-Game`, one set of helper definitions, and one terminal `exit $exitCode`.
+- 186 stale lines removed; no valid installer logic was intentionally changed.
+
+### Verification after fix
+
+- PR CI #165, run `45583509798`, for PR head `a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa`: **completed successfully**. Installer PowerShell parse + read-only dry-run, MSVC initialization, Windows PowerShell 5.1 stderr probe, Rust toolchain/cache, normal and all-features Clippy, release build, and workspace tests all passed. Workspace tests: **212 passed, 0 failed, 2 ignored, 3 filtered out**.
+- The dedicated D3D12 Wave64 step also completed successfully, but its output explicitly said `adapter supports neither 32- nor 64-lane waves; skipped`. This is a successful hosted-runner skip, not a hardware dispatch. The earlier RTX 3070 local dispatch validation remains the hardware evidence.
+- Run link: https://github.com/cmyk-ux/r4y/actions/runs/45583509798
+- Main fix commit link: https://github.com/cmyk-ux/r4y/commit/128e3d135799304390676a8667247088e900675d
+- PR branch fix commit link: https://github.com/cmyk-ux/r4y/commit/a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa
+
+### Next actions
+
+1. Re-check CI #165 to its terminal conclusion. If Clippy/build/tests fail, inspect the exact failing step and fix it; do not mistake a successful parser step for full CI success.
+2. Check the main push CI for commit `128e3d1` if the available Actions listing exposes it; the current connector's `fetch_commit_workflow_runs` wrapper is PR-filtered.
+3. Keep PR #16 open until the already documented RTX 3070 Wave64 test and affected-title runtime regression check are accounted for. The earlier user RTX 3070 DPP/Wave64 dispatch suite passed; installer CI parser errors were independent and prevented the hosted run from reaching its D3D12 step.
+
+
+## 8. Runtime log collection protocol
+
+The user cannot upload the full runtime log into chat and expects the assistant to request **specific, narrow PowerShell extractions**. Do not ask them to paste a clipboard dump, the full log, or hundreds of generic keyword matches.
+
+### Required approach
+
+- First identify the exact subsystem and unresolved question from the current investigation (for example, Wave64 pipeline translation, descriptor slot-zero SRV dimensions, descriptor heap bounds, D3D12 device removal/DRED).
+- Give a ready-to-run PowerShell snippet that reads the path held in the variable $path, initialized as shown below.
+- Use Select-String -LiteralPath $path -Pattern with specific phrases or regexes, constrain results with Select-Object -First N or -Last N, and print each match with its line number in the form L{LineNumber}: {Line}.
+- Group a few closely related questions under clear Write-Host headings. Include exact hashes, error strings, or subsystem phrases already observed in the code/logs. Avoid broad generic patterns such as error|warn|shader|pipeline|d3d12 that match most of the file.
+- If context is required, request a small surrounding window around matching line numbers (for example, Get-Content with calculated start/end indices) rather than dumping all matches. Keep output to a manageable number of lines.
+- Prefer raw matching lines first. Only request expanded context or a second extraction after seeing the returned evidence.
+- Do not tell the user to press Ctrl+V after copying a report unless the actual report content has been included in their message; clipboard contents are not automatically visible to the assistant.
+- Do not make the user choose the log patterns. The assistant owns selecting the evidence needed for the next diagnostic decision.
+
+### Example: current Wave64 runtime follow-up
+
+When checking the affected title after the Wave64 implementation, a focused first pass can request:
+
+\`\`\`powershell
+$path = "$env:LOCALAPPDATA\\R4Y\\logs\\r4y-run.log"
+
+Write-Host "\`n===== TARGET HASHES ====="
+Select-String -LiteralPath $path -Pattern '13dfdd3b1136e407|88994c3496045f51' |
+    Select-Object -Last 30 |
+    ForEach-Object { "L$($_.LineNumber): $($_.Line)" }
+
+Write-Host "\`n===== WAVE64 REFUSALS / HOST PIPELINE REJECTIONS ====="
+Select-String -LiteralPath $path -Pattern 'wave lane count of 64|host pipeline refused|wave64|split wave64' |
+    Select-Object -Last 40 |
+    ForEach-Object { "L$($_.LineNumber): $($_.Line)" }
+
+Write-Host "\`n===== D3D12 DEVICE REMOVAL / DRED ====="
+Select-String -LiteralPath $path -Pattern 'DXGI_ERROR_DEVICE|DEVICE_HUNG|DEVICE_REMOVED|DRED|breadcrumb|device removed|device hung|page.?fault VA' |
+    Select-Object -Last 25 |
+    ForEach-Object { "L$($_.LineNumber): $($_.Line)" }
+\`\`\`
+
+This example is a starting point, not a fixed template: change the patterns to match the actual open question. The previous broad 900-line extraction was excessive and should not be repeated.
+
+
+## 9. Post-installer runtime test — Wave64 executable/profile mismatch investigation (2026-11-25)
+
+The user ran the affected title after the installer fix. Their checkout reported branch \`feature/wave64-host-target\`, HEAD \`a24552a\`.
+
+### New log facts
+
+From \`%LOCALAPPDATA%\\R4Y\\logs\\r4y-run.log\`:
+
+- Both target compute shaders translate from disk cache (\`cached=true\`) but their host pipeline creation is rejected with \`0x80070057\`:
+  - \`13dfdd3b1136e407\`
+  - \`88994c3496045f51\`
+- Both are later bound and their dispatches are dropped for lack of a host pipeline. Observed per-frame drop reports: 0.5/frame and 0.1/frame, later 5.0/frame for the first hash.
+- 168 D3D12 debug messages say a shader requires WaveSize 64 while the device max is 32.
+- There are 136 \`host pipeline refused\` records. An attempted PowerShell parser returned zero hashes even though raw lines visibly contain \`shaders=[compute <16-hex-hash>]\`; treat this as an extraction-script failure, not evidence of absent hashes. Retry with a simpler parser and first print a few raw refusal lines.
+- The searched startup markers \`host wave sizes\` and \`the host has no 64-lane waves\` are absent from this log.
+- Four GPU-Based Validation warnings again report Texture2D expected vs Texture1D in descriptor heap slot 0, with pixel shaders \`c0a7fe77b1862e10\`, \`0d1575a396dfe513\`, and \`280967ad158cee0b\`.
+- No matching device-removal / device-hung / DRED lines were returned by the focused search. This means no such diagnostic was observed in the excerpted log, not proof that none occurred outside the captured file.
+- GPU-Based Validation is enabled; the 0.6 FPS / ~1.7 s frame observed in the same interval is not representative performance.
+
+### Critical discrepancy: selected profile may be stale
+
+The checked-out source on PR #16 contains an unconditional \`tracing::info!(..., "host wave sizes")\` immediately after D3D12 OPTIONS1 is queried in \`crates/r4y-gpu/src/host.rs\`. It also warns if the host cannot run 64-lane waves. The runtime log contains D3D12 host activity and debug-layer messages but neither startup marker, while still showing fixed-Wave64 shader creation failures.
+
+The launch path in \`r4y-run.cmd\` invokes \`scripts/install.ps1 --launch\`. \`Invoke-Launch\` reads \`%LOCALAPPDATA%\\R4Y\\install-state.json\`; if \`profile=diag\`, it launches \`target\\diag\\r4y.exe\`, otherwise \`target\\release\\r4y.exe\`. The installer's \`Build-R4Y\` uses:
+- diagnostics: \`cargo build --profile diag --locked -p r4y --features diagnostics\`
+- release: \`cargo build --release --locked -p r4y\`
+
+Therefore, a previous recommendation to build only \`--release\` does **not** refresh the executable actually launched when the persisted installer profile is \`diag\`. The current log explicitly reports \`GPU-based validation on\`, which strongly suggests a diagnostics binary/profile. It is not yet proven which binary's timestamp/profile was used; inspect \`install-state.json\` and both target binary timestamps, then rebuild the selected profile before drawing conclusions about the Wave64 implementation.
+
+### Next actions
+
+1. Have the user inspect \`install-state.json\` (\`profile\`) and \`target\\diag\\r4y.exe\` / \`target\\release\\r4y.exe\` timestamps.
+2. Rebuild the profile actually selected by the installer; for \`diag\`, use \`cargo build --profile diag --locked -p r4y --features diagnostics\`. Then relaunch through \`r4y-run.cmd\`.
+3. First verify that the new log contains \`host wave sizes lanes_min=32 lanes_max=32\` (or the actual reported values) and the expected no-64-lane warning. Only then assess remaining Wave64 shader failures.
+4. Re-check the two target hashes and all refusal hashes using a corrected extraction script. Do not treat shader-cache hits as proof that the currently checked-in translator generated those cache entries until the selected binary/cache fingerprint is verified.
+5. Keep slot-zero SRV mismatch and descriptor virtualization as independent investigations; do not conflate them with Wave64 or the stale-binary/profile concern.
+
+
+## 10. Correct Diagnostics runtime — target Wave64 pipelines now created; title still crashes (2026-11-25)
+
+The user rebuilt and launched the profile selected by install-state.json (Diagnostics). This corrected the prior stale-profile ambiguity.
+
+### Confirmed on the correct runtime
+
+From the new LOCALAPPDATA R4Y run log:
+
+- Device initialization explicitly logs host wave sizes lanes_min=32 lanes_max=32, followed by the warning that the host has no 64-lane waves. This confirms the current Diagnostics binary contains host-wave-aware initialization on the RTX 3070.
+- Both previously problematic compute shaders were translated freshly (not from the previous cache):
+  - 88994c3496045f51: cached=false, 8 ms; host pipeline created at 09:34:58.785.
+  - 13dfdd3b1136e407: cached=false, 10 ms; host pipeline created at 09:34:58.802.
+- Both subsequently reached first bind:
+  - 13dfdd3b1136e407 at 09:35:44.620, frame 1168.
+  - 88994c3496045f51 at 09:36:07.518, frame 1186.
+- The focused extraction returned no host pipeline refused rows and no D3D12 debug-layer Shader wants wave lane count of 64 messages for this run. The previous run had 136 PSO refusal rows and 168 such Wave64 warnings. This is strong evidence that the targeted Wave64 split now makes those two actual title pipelines successfully on the Wave32 RTX 3070. The previous failures are no longer valid for this freshly built runtime.
+- Do not claim the entire game's Wave64 workload is supported. The first 25 shader does not translate rows include deliberate/known unsupported cases, e.g. a select on an untracked mask, descriptors not loaded or built, direct lane-mask data reads, LDS sharing without barriers on a Wave32 host, and general console Wave64 lanes. These are separate shader-lowering limitations and need triage by relevance to crash.
+- User reports loading took substantially longer, then the screen went black and the game crashed as before. This timing is not yet causally attributed. First-time target-specific shader translations (cached=false), PSO/library behavior, diagnostics instrumentation and GPU-based validation are potential overheads; do not assume Wave64 implementation itself caused the longer load.
+
+### Crash-report facts
+
+The end of the log includes a title Breakpad report at 09:37:38:
+- Game Version: 930.048.020 / build 930.048.020-vb_sub_story.
+- device.model: Xbox Series X; platform: scarlett.
+- memory.load_percent=92.
+- system.memory.free=2604432; units are not explicitly labelled in this log excerpt. Treat this as a pressure signal only, not a definitive available-memory measurement.
+- Breakpad added crashcontext.log from path T:/r4y-20261125-063738-20352.crash.log.
+- It added upload_file_minidump from T:/00000000-0000-0000-0000-000000000000.dmp (~37,456,412 bytes).
+- Upload destination was submit.backtrace.io:443, but R4Y's network HLE logged HTTP connection blocked destination=submit.backtrace.io:443.
+- This is a title-side crash report, not yet proof of a D3D12 device removal. The prior focused search returned no DXGI_ERROR_DEVICE, DEVICE_HUNG, DEVICE_REMOVED or DRED markers. Keep title/Breakpad exception and GPU device removal distinct.
+
+### Next action — inspect crashcontext file and R4Y tail
+
+Ask the user to run focused PowerShell against the exact crashcontext path:
+1. Check whether T:/r4y-20261125-063738-20352.crash.log still exists.
+2. If it exists, print its first 100 and last 180 lines, with line numbers; additionally print lines matching exception/crash/assert/fatal/callstack/stack/unknown-symbol/failed and surrounding lines.
+3. If it does not exist, inspect the R4Y run log for crash report heading, exception code, faulting module/address, call stack, crash thread and title log lines immediately before 09:37:38.
+4. Also capture the run's frame timing / drop summaries between 09:35 and crash, and check whether device-removed reason was logged.
+5. Do not ask for the 37 MB minidump or the entire R4Y log. Ask for line-oriented, targeted PowerShell output only.
+
+After receiving crashcontext evidence, correlate the crashing subsystem/thread with the last GPU submits, dropped dispatches, descriptor warnings and memory pressure. Keep the already-fixed target shader pipeline creation as a regression success; do not roll it back while investigating this separate title crash.
+
+### Current project state
+
+- Local test checkout: feature/wave64-host-target, HEAD a24552a.
+- PR #16 remains open. Its intended runtime regression check now has materially improved evidence: the two named pipelines create and bind on the RTX 3070. Do not merge until the new crash is understood or the user explicitly elects to merge with the remaining limitation documented.
+- Slot-zero SRV Texture2D-vs-Texture1D mismatch persisted in the earlier diagnostics log and remains a separate issue; the newest pasted extraction did not include the GBV pattern, so its status on this exact run is unknown.
+
+
+### Crash artifact path correction and captured exception details (2026-11-25)
+
+Correction to the previous next-step note: the game's T: drive is a virtual title filesystem mount, not the user's host T: drive. apps/r4y/src/run.rs establishes:
+- temp = cfg.data_subdir("7952987A/temp") for TitleID 7952987A.
+- r4y_hle::modules::files::mount_at('T', &temp) maps title T: to that host directory.
+- r4y_loader::log_crashes_to(temp.with_file_name("crashes.log")) saves R4Y exception reports to a sibling file, <data_dir>/7952987A/crashes.log.
+- Default data root is %LOCALAPPDATA%\R4Y\data (unless R4Y_DATA_DIR or [paths].data_dir overrides it; config resolution is in crates/r4y-core/src/config.rs).
+
+Thus the expected host paths with the generated default config are:
+- Crash context: %LOCALAPPDATA%\R4Y\data\7952987A\temp\r4y-20261125-063738-20352.crash.log
+- R4Y exception stack log: %LOCALAPPDATA%\R4Y\data\7952987A\crashes.log
+
+The previous request to inspect literal host path T:\r4y-... was incorrect because it treated the guest mount as a host volume. Correct future log collection accordingly.
+
+### Captured fatal exception details
+
+The user's latest extraction already contains:
+- First-chance and unhandled exception: 0xc0000005, access violation, write to 0x0, reported by R4Y as nothing mapped there.
+- Faulting PC: r4y-image-b99f876b74d4a77f.dll+0x23cf683.
+- crates/r4y-loader/src/crash.rs::report() logs the full general-purpose registers and up to 40 unwound frames immediately after the exception line. The user's pattern-only extraction omitted these adjacent lines; the R4Y run log already has them. Next extraction must request a small line window around both R4Y: first-chance exception and R4Y: unhandled exception, not just matching lines.
+- memory_at(0) calls VirtualQuery and reports nothing mapped there for MEM_FREE; it is not an OOM classification. Treat this as a null/unmapped write access violation. The offset is within the prepared title image (r4y-image-...), but do not infer its function/cause until the registers and stack frames are read.
+- The title Breakpad context is expected in the mapped title temp directory, and R4Y's own exception report is expected in sibling crashes.log.
+
+Working-set evidence preceding the crash:
+- copystat reports working set rising from ~6,852 MB at 09:35:04 to ~17,292 MB at 09:37:01, with several snapshots around 16-17 GB.
+- Breakpad reports memory.load_percent=92, system.memory.free=2604432, system.memory.total=33475460; units are not explicitly documented in the crash excerpt. This suggests significant system memory pressure, but does not prove the null write was caused by memory exhaustion. Do not conflate the AV with OOM.
+
+Next user-facing extraction:
+1. Read the configured data root (generated default %LOCALAPPDATA%\R4Y\data; account for R4Y_DATA_DIR or [paths].data_dir if customized).
+2. Check existence and metadata of the exact host paths above.
+3. Print the head/tail and exception/stack-related lines of the title crashcontext if present, plus the last ~120 lines of crashes.log.
+4. From r4y-run.log, emit roughly 12 lines before and 45 after the first-chance/unhandled exception lines, preserving line numbers. This should expose all register values and unwind frames already emitted by R4Y.
+5. Do not use a PowerShell if block followed by else pasted separately into an interactive prompt. Use a single complete script block or independent if without a detached else.
+
+
+## 11. PR #16 branch-local validation history
+
+The following records are retained from the feature branch because they contain the exact test/Clippy failures, their repairs, the CI ownership boundary and the structured-buffer prototype caveats. The newer runtime evidence in sections 9–10 above supersedes older status notes where they differ.
+
 ## 7. Follow-up: test/Clippy compile failure and repair (2026-11-25)
 
 The user ran the validation commands before the RTX 3070 A/B and reported:
@@ -430,7 +630,6 @@ cargo build --release --locked -p r4y
 ```
 
 Also verify the CI run for the exact PR head, not merely the prior green run. Only after these pass should the RTX 3070 `R4Y_WAVE64_CONSOLE_FLOW` A/B be attempted.
-
 
 ## 8. Follow-up: structured-buffer regression, Clippy and CI ownership (2026-11-25)
 
@@ -518,63 +717,13 @@ The most recent source/CI configuration commit is `1c7cc18f45e4f8b02433b4df92ff2
 - The connected GitHub tool's token type is not exposed to this session, so do not state that this is the proven cause. It is a plausible explanation for why API-driven PR mutations did not yield a visible Actions run. The observed fact remains: no run/check is associated with the exact feature head.
 - Consequently, merely adding `edited` to the `pull_request` activity types would not reliably solve an automated-token trigger. The durable route is a dispatch-capable integration with Actions write permission, after the workflow-dispatch trigger is present on `main`, dispatching the feature ref and checking the exact SHA.
 
+## 12. Current branch implementation: indirect argument clamp
 
-## 9. Session continuation and AMD fork audit (2026-11-25, latest addendum)
-
-### Exact PR/branch state checked in this session
-
-- PR #16 remains open and unmerged: https://github.com/cmyk-ux/r4y/pull/16
-- Active branch: `feature/wave64-host-target`.
-- At the time this addendum was authored, the PR head was `fdd52680b45c50e8b670391b58b93887ea4213dd`. This is after the two documentation commits recorded below; the handoff update itself creates a subsequent documentation-only commit.
-- PR snapshot: 117 commits, 26 changed files, `mergeable=false`; the branch comparison was 115 ahead / 27 behind `main` before the two documentation commits. Recheck exact compare/head before any merge or rebase. Do not merge merely to generate CI.
-- Exact head `fdd52680b45c50e8b670391b58b93887ea4213dd`: `fetch_commit_workflow_runs` returned no workflow runs and combined commit status returned no statuses. Therefore this head has **no confirmed CI validation**. Recheck after this handoff-only commit as well.
-- The workflow branch contains the intended updated Tests step and a `workflow_dispatch` declaration, but `main` still lacks `workflow_dispatch`. The connected GitHub tool surface has no action to create/dispatch a new Actions run; it can only inspect and rerun existing runs. No new run can be created through the available integration in this session. Keep this as an explicit blocker; do not mark the branch green or ask the user to substitute a local build for CI.
-- PR being 27 commits behind and reported `mergeable=false` is a separate integration concern. Inspect the exact compare/conflict state before a rebase/merge; do not rewrite the branch blindly.
-
-### New external reference audit: Belobug/VIctory-Belobug-AMD
-
-Detailed code-level comparison and recommended R4Y tests are in [`.agent/VICTORY_AMD_FORK_AUDIT.md`](VICTORY_AMD_FORK_AUDIT.md). The reference watchlist was supplemented with a link, without changing the owner's four-repository priority order in [`.agent/REFERENCE_REPOS.md`](REFERENCE_REPOS.md).
-
-Audited AMD fork head: `4cbe9d76cf3c1fdca7f9a8d8364eacc33e7aa597`. The README says its base is upstream VIctory `8e79c80`; compare shows 492 commits ahead of that base. It is a substantial derivative and must not be wholesale merged/cherry-picked. Its status is self-reported on one RX 9070 XT / Windows 11 system: 3–5 FPS, world rendering visible, not playable, no NVIDIA/Intel testing; moving vehicles and some compute/ray-tracing work remain broken.
-
-Highest-priority finding:
-- R4Y's current indirect clamp mutates the original title argument shadow and does not pass the optional `ExecuteIndirect` count into the pre-clamp helper.
-- The AMD fork reads source arguments separately, writes bounded records to a device-local scratch output, clamps only `min(max,count)`, and uses bounded compare-exchange/saturating budget logic.
-- It later hoists clamp operations before a run of indirect draws, but does so only while the producer-write counter says the source arguments remain unchanged. Earlier less-ordered modes caused visible flicker; mode 7 (sequential clamps with explicit barrier) became the default.
-- Recommended order: write tests for source immutability/count/state/lifetime/budget first; implement an R4Y-native scratch clamp; only then investigate hoisting with producer-write invalidation and conservative ordering. Performance figures in the fork are not R4Y results.
-
-Secondary shader finding:
-- R4Y's current `helpers_read` predicate requires a pixel shader with discard; the fork uses quad reads for all pixel quad-local reads because wave reads excluded helper values on its AMD driver.
-- R4Y's `v_readfirstlane_b32` has no equivalent of the fork's helper-lane-own-value special case. This may affect waterfall descriptor loops and derivative-dependent texture coordinates.
-- Add narrow fixtures and validate with DXIL validation, WARP and the RTX 3070 before changing the translator. Do not assume AMD failure behavior is present on NVIDIA.
-
-Other audit conclusions:
-- The fork's constant ambient and no-wind shader swaps are visual workarounds, not general fixes.
-- Its per-command GPU timing, bounded target-memory peeks and shader patch/swap switches are useful diagnostic patterns; R4Y already has timestamp facilities, so compare/extend existing code before duplicating.
-- PortWatch's current milestone method places "world loads and renders, however broken" at 40% and "playable / control a character" at 50%; quality tracks only count after Playable. The captured tracker snapshot refreshed at `2026-11-25T10:22:39.836Z` contained neither `Belobug` nor `VIctory-Belobug-AMD`. Do not say the fork has an official PortWatch score.
-- No R4Y production code was changed as part of this external audit. It is research/documentation only.
-
-### Documentation commits
-
-- `d0910d1153a7cb96b747402d899a1340befc2cb6` — add `.agent/VICTORY_AMD_FORK_AUDIT.md`.
-- `fdd52680b45c50e8b670391b58b93887ea4213dd` — add the supplemental reference entry to `.agent/REFERENCE_REPOS.md`.
-- The current handoff append is being committed after these. Verify the resulting PR head and query Actions again; do not assume a docs commit triggered CI.
-
-### Next actions — precedence over stale earlier notes above
-
-1. Re-read current PR head, compare to `main`, inspect workflow file on both refs and query exact-head Actions/checks. The latest checked head had zero runs/checks.
-2. Obtain a dispatch-capable Actions mechanism (workflow-dispatch must also exist on default branch and the dispatch must target `feature/wave64-host-target`). The current GitHub connector does not expose it. Until an actual run is created, do not claim CI success.
-3. Once CI runs, inspect all steps/logs, especially shader stride tests, gather regression, workspace tests, Clippy (normal and all-features), diagnostics build and release build. The structured-buffer lowering prototype commit `004cfac5d87904ba1fc63d0b0fe4f02ea5643a14` is still unverified; do not call it fixed.
-4. Do not ask the user to repeat the local suite simply to compensate for missing CI. After CI and source-level failures are resolved, request only the hardware evidence that CI cannot provide (RTX 3070 D3D12 dispatch and affected-title A/B).
-5. Queue the indirect scratch/count correctness redesign from the AMD audit as a focused R4Y-native work item; do not implement clamp hoisting before correctness tests and source-write ordering are sound.
-6. Add helper-lane/quad and helper `v_readfirstlane` shader fixtures as a separate targeted investigation. Keep this distinct from the Wave64 compute split and GTA VI runtime watchdog.
-
-
-## 10. Indirect argument clamp: non-destructive scratch output (2026-11-25)
+### Indirect argument clamp: non-destructive scratch output (2026-11-25)
 
 ### Implementation now present on the branch
 
-Latest feature head at this update: `b7f39f590c0c5bb8d9640b13b0ec52a7be7a8ce6` (PR #16, still open).
+Latest feature head before the main-merge integration: `b7f39f590c0c5bb8d9640b13b0ec52a7be7a8ce6` (PR #16, still open).
 
 Files changed:
 - `crates/r4y-gpu/src/indirect.rs`
