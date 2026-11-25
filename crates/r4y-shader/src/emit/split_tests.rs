@@ -177,7 +177,7 @@ fn run(
 }
 
 #[test]
-fn in_half_lane_reads_match_console_on_d3d12_hardware() {
+fn wave64_split_matches_console_on_d3d12_hardware() {
     let Ok(host) = Host::new(false) else {
         eprintln!("no D3D12 shader-model 6.6 device; skipped");
         return;
