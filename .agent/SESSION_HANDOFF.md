@@ -430,3 +430,62 @@ cargo build --release --locked -p r4y
 ```
 
 Also verify the CI run for the exact PR head, not merely the prior green run. Only after these pass should the RTX 3070 `R4Y_WAVE64_CONSOLE_FLOW` A/B be attempted.
+
+
+## 8. Follow-up: structured-buffer regression, Clippy and CI ownership (2026-11-25)
+
+### User-reported local failures
+
+The user stopped validation after seeing failures and supplied these results from the local RTX 3070 machine:
+
+- `cargo test -p r4y-shader --lib`: 214 passed, 2 failed, 2 ignored.
+- `emit::stride_tests::a_heap_buffer_read_by_element_takes_the_views_stride` failed at `stride_tests.rs:295`: actual output began `[101, 104, 107, ...]`, expected `[200, 201, 202, ...]`.
+- `emit::synthetic_tests::gathers_at_a_level_match_the_hardware` failed at `synthetic_tests.rs:263`, comparing the translated manual gather result (`got(0)`) against the CPU reference. It failed before the later native-gather comparison.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` separately found:
+  - missing safety comment on the `GetResourceAllocationInfo` unsafe block in `crates/r4y-gpu/src/resource.rs`;
+  - `key_for_target` with 8 arguments in `crates/r4y-gpu/src/shader_cache.rs`.
+- The user did not wait for or report the final result of `cargo build --release --locked -p r4y`.
+
+### DXIL lowering diagnosis and published prototype
+
+The two shader failures both exercise structured-buffer access but through different paths:
+
+1. The dynamic resource-heap test uses a structured buffer with a 12-byte descriptor stride. The shader has no static `UsedResource` entry for the descriptor, so the translator reads the host `VIEW_STRIDES` table at runtime. It was computing `element * stride + byte_offset` and emitting a RawBufferLoad with the byte address as coordinate 0 and undef coordinate 1, despite the underlying descriptor being structured.
+2. The synthetic gather test reads a known structured SRV with stride 16. Its `buffer_load_dwordx4` is offset-only (`idxen=false`), but the translator emitted the RawBufferLoad raw-buffer coordinate form. In DXIL, StructuredBuffer RawBufferLoad uses coordinate 0 = element index and coordinate 1 = byte offset within that element; the raw form instead uses coordinate 0 = byte offset and requires coordinate 1 to be undef. DXC validator source checks this distinction in `DxilValidation.cpp`.
+
+A prototype lowering change was committed:
+
+- `004cfac5d87904ba1fc63d0b0fe4f02ea5643a14` — `Fix structured buffer byte-offset lowering`.
+- It retains dynamic `VIEW_STRIDES` values, calculates element/within-element coordinates with unsigned divide/remainder, and emits the structured handle form for the affected load/store/atomic paths. For statically known structured offset-only accesses, it derives the stride from the used-resource entry.
+- **This is a hypothesis-driven implementation, not yet a verified fix.** No local compile, DXIL validation, D3D12 execution, or green CI was confirmed after this commit. In particular:
+  - dynamic resource-heap descriptor handle properties currently use a structured resource kind with a runtime descriptor stride and property stride 0; DXIL validation and actual driver behavior must be confirmed;
+  - dynamic raw-buffer heap entries may require an explicit descriptor-kind tag in the host metadata and a safe kind-matched null fallback. Do not assume every heap-indexed buffer descriptor is structured;
+  - the byte/half subword load/store paths still take the raw-view route and have not been generalized by this prototype;
+  - the zero-stride descriptor path in `buffer_guard` still redirects to the existing raw null SRV/UAV. If CI exposes a structured-null mismatch, add a structured null descriptor and update the heap layout/test coverage rather than skipping the test.
+
+### Clippy repairs published
+
+- `29ad56f9c04bddfe99e6f65f0439a10aed016da8` — added the missing safety contract immediately before `GetResourceAllocationInfo`. The device is owned by the live host and the descriptor comes from the live texture.
+- `228ff8981247eedbdb632a682fb3d63ac0d54937` — grouped cache-key inputs in a private `KeySettings` value, preserving the prior hash serialization order while reducing `key_for_target`'s parameter count.
+- These source changes also await CI verification.
+
+### CI workflow changes published
+
+- `1c7cc18f45e4f8b02433b4df92ff271fbbd0bbf` — added `workflow_dispatch` to `.github/workflows/ci.yml` and removed `gathers_at_a_level_match_the_hardware` from the workspace test skip list.
+- The gather test's CPU-reference path is architecture-independent and runs on the D3D12/WARP devices the test can create. The later comparison against native gather is already conditional on `!warp`. Keep the Wave32/Wave64 architecture-reference tests skipped on GitHub-hosted runners without a guaranteed matching adapter.
+- The existing `pull_request` trigger already starts a fresh run when commits are pushed to this PR branch. The explicit `workflow_dispatch` trigger is retained for future manual runs.
+
+### Mandatory CI ownership / validation policy
+
+**CI validation belongs to the assistant maintaining this repository, not to the user.** For every source-code batch intended for user testing:
+
+1. Push the finished source changes to the active PR branch, allowing the `pull_request` workflow to run. Use `workflow_dispatch` only when a manual run is actually needed and an authorized dispatch mechanism is available.
+2. Query Actions for the new run and confirm that it is associated with the current PR head. GitHub's pull-request workflow may expose a synthetic merge SHA as `head_sha`; compare its PR metadata and parents with the current branch tip rather than mistaking an old green commit or synthetic merge commit for a different source revision.
+3. Inspect all workflow jobs and steps, then fetch logs for failures. Fix source/workflow errors and repeat until the exact PR head has a completed green run, or clearly state the remaining external limitation (for example, a hosted runner cannot provide the required physical GPU).
+4. Never make the user act as the CI runner when the GitHub workflow can validate the change. Never imply a prior green run validates commits that were pushed after it. Do not describe missing CI as a user-side problem.
+5. A green hosted CI run proves only the tests and hardware/software environment actually exercised. Record architecture-specific or physical-GPU tests not covered by hosted runners separately; do not represent them as green by implication.
+6. Do not ask the user to rerun a long local build/test suite merely to compensate for not checking Actions. Ask for local hardware evidence only when the required RTX 3070 runtime experiment genuinely cannot run on GitHub-hosted hardware.
+
+### State at the time of this handoff update
+
+The most recent source/CI configuration commit is `1c7cc18f45e4f8b02433b4df92ff271fbbd0bbf`. The PR head must be queried again after this edit because this handoff update itself creates another commit and triggers another PR workflow. **No green CI result for the structured-buffer prototype is claimed here.** The next assistant session must check the latest branch head and its associated Actions run before asking the user to test or continuing to the game A/B.
