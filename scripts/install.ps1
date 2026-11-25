@@ -268,59 +268,44 @@ function Select-Game {
         (Test-Path -LiteralPath $state.game_dir -PathType Container) -and (Test-Path -LiteralPath $state.exe -PathType Leaf)) {
         if ($script:AssumeYes) { return @($state.game_dir, $state.exe) }
         if (-not [Console]::IsInputRedirected) {
-            $answer = Read-Host ('Reuse last game executable ' + $state.exe + '? [Y/n]')
+            $answer = Read-Host ('Reuse last game folder and executable? [Y/n]')
             if (-not $answer -or $answer -notmatch '^(?i:n|no)$') { return @($state.game_dir, $state.exe) }
         }
     }
 
+    # The game data directory and executable are two independent selections.
     $directory = $null
-    $executable = $null
     if (-not [Console]::IsInputRedirected) {
-        $typed = Read-Host 'Enter the game folder or executable path, or press ENTER to browse'
-        if ($typed) {
-            $typed = $typed.Trim().Trim('"')
-            if (Test-Path -LiteralPath $typed -PathType Leaf) {
-                $candidate = Get-Item -LiteralPath $typed
-                if ($candidate.Extension -ine '.exe') {
-                    throw ('The selected file is not a Windows executable: ' + $typed)
-                }
-                $executable = $candidate.FullName
-                $directory = $candidate.DirectoryName
-            } else {
-                $directory = $typed
-            }
-        }
+        $typedDirectory = Read-Host 'Select the game folder (data directory), or press ENTER to browse'
+        if ($typedDirectory) { $directory = $typedDirectory.Trim().Trim('"') }
     }
     if (-not $directory) { $directory = Pick-Folder }
-    if (-not $directory -or -not (Test-Path -LiteralPath $directory -PathType Container)) { throw 'A valid game folder was not selected.' }
+    if (-not $directory -or -not (Test-Path -LiteralPath $directory -PathType Container)) {
+        throw 'A valid game folder was not selected.'
+    }
     $directory = (Resolve-Path -LiteralPath $directory).ProviderPath
 
-    if (-not $executable) {
-        $found = @()
-        $found += @(Get-ChildItem -LiteralPath $directory -Filter '*.exe' -File -ErrorAction SilentlyContinue)
-        foreach ($child in (Get-ChildItem -LiteralPath $directory -Directory -ErrorAction SilentlyContinue)) {
-            $found += @(Get-ChildItem -LiteralPath $child.FullName -Filter '*.exe' -File -ErrorAction SilentlyContinue)
-        }
-        if ($found.Count -eq 1) {
-            $executable = $found[0].FullName
-        } elseif ($found.Count -gt 1 -and -not [Console]::IsInputRedirected) {
-            for ($i = 0; $i -lt $found.Count; $i++) { Write-Host ('[' + ($i + 1) + '] ' + $found[$i].FullName) }
-            $choice = Read-Host 'Enter an executable number, or press ENTER to browse'
-            if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $found.Count) {
-                $executable = $found[[int]$choice - 1].FullName
-            }
-        }
-        if (-not $executable) { $executable = Pick-File $directory }
-        if (-not $executable -and -not [Console]::IsInputRedirected) {
-            $executable = (Read-Host 'Enter the full path to the game executable').Trim().Trim('"')
-        }
+    $executable = $null
+    if (-not [Console]::IsInputRedirected) {
+        $typedExecutable = Read-Host 'Now select the game executable (.exe); it may be in a different folder'
+        if ($typedExecutable) { $executable = $typedExecutable.Trim().Trim('"') }
     }
-    if (-not $executable -or -not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'A valid game executable was not selected.' }
-    $executable = (Resolve-Path -LiteralPath $executable).ProviderPath
-    $prefix = $directory.TrimEnd('\') + '\'
-    if (-not $executable.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'The executable must be inside the selected game folder.'
+    if (-not $executable) { $executable = Pick-File $directory }
+    if (-not $executable -and -not [Console]::IsInputRedirected) {
+        $executable = (Read-Host 'Enter the full path to the game executable').Trim().Trim('"')
     }
+
+    if (-not $executable -or -not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+        throw 'A valid game executable was not selected.'
+    }
+    $candidate = Get-Item -LiteralPath $executable
+    if ($candidate.Extension -ine '.exe') {
+        throw ('The selected game executable must be a .exe file: ' + $candidate.FullName)
+    }
+    $executable = $candidate.FullName
+
+    # Do not require the executable to live under game_dir: some dumps and
+    # compatibility layouts keep the launcher/executable in a separate path.
     return @($directory, $executable)
 }
 
