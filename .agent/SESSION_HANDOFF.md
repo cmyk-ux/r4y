@@ -919,3 +919,43 @@ $env:R4Y_D3D12_DRED = "1"
 ```
 
 DRED enables auto-breadcrumb/page-fault reporting and command markers; it is independent of GBV. Keep console-flow at its default for this first attribution run.
+
+
+## 16. RTX 3070 DRED run and prelude/pipeline-sync follow-up (2026-11-25)
+
+### New user-provided Diagnostics runtime evidence
+
+Source log: `%LOCALAPPDATA%\\R4Y\\logs\\r4y-run.log`, lines 5438–5563 (provided in chat). Title debug context: `data\\7952987A\\temp\\r4y-20261125-063738-20352.crash.log`. The user-provided `crashes.log` tail contains both title AV reports and D3D12 device-removal reports; do not conflate them.
+
+- RTX 3070 host telemetry reports `host_wave_target=Some(Target { lanes_min: 32, lanes_max: 32 })`. Successfully translated compute shaders in this sample generally declare `dxil_wave_size=Some(32)`; vertex/pixel stages commonly have `None`. This confirms the new translation telemetry is operating on the Wave32 host.
+- Some console Wave64 compute shaders remain explicitly refused (for example hashes `2cc4c197ee29e291` and `7168dd781ca7efb9`, error `console wave64 lanes on a host without 64-lane waves is not supported`). Treat these refusals as known unsupported shader coverage, not as proof of the D3D12 hang cause.
+- One command was individually measured at **3089.8 ms**: `dispatch 128x64x1 [compute 42683eebec081520]`, in a list of 88 commands at 13:25:55.118 UTC. It proves at least one extremely long compute dispatch exists in this run. It has not yet been tied causally to the subsequent device removal.
+- A later list reported `slow host list ms=8155 commands=26` at 13:26:03.361 UTC. Most displayed per-command values for this list were 0.0 ms; do not interpret that as proof those commands took no GPU time. The submission then reported 8.199 s across 33 lists and a D3D12 removal.
+- D3D12 debug layer identified `DXGI_ERROR_DEVICE_HUNG` / `0x887A0006`, explicitly describing a TDR after the device took an unreasonable time to execute commands.
+- Breadcrumb output included `59/62` with op 6 (`DISPATCH`) and an unmapped list owner (`None` in the old reporter output), plus another in-flight region associated with a 26-command list. The unmapped 62-command node has not been proven to be a prelude yet; new instrumentation must establish its owner before assigning the cause.
+- The title's debug snapshot reported TileHeap 2562/6236 MiB and near-full title physical memory/pool counters. This makes memory/streaming pressure a secondary possibility, but it does not prove OOM and does not replace the D3D12 TDR evidence.
+- The same `crashes.log` tail repeats the title watchdog null-write at `r4y-image-...+0x23cf683` (write to unmapped address 0). Keep this title-side watchdog exit separate from a D3D12 device-removal failure.
+
+### Code changes committed to the existing PR branch
+
+All changes are on `feature/wave64-host-target`, which updates PR #16. The PR remains open.
+
+1. `6493f7dbbaf9efc6396618b34a8c381594833a16` — `crates/r4y-gpu/src/list.rs`: pipeline sync is no longer a no-op. It records a global UAV barrier on the current host command list. Added a unit test for the null-resource global barrier payload. This ports the underlying idea from the experimental VIctory branch `Dufftwt/VIctory:test/world-stack-sync`; that experiment is not itself proof of an in-game fix.
+2. `fefb86e1c27a18da93d86049cd6c5c5ddc90dcbe` — `crates/r4y-gpu/src/twin.rs`: depth-twin conversion now emits a diagnostic marker immediately before each internal converter dispatch, including direction, subresource, dimensions, format and pitches.
+3. `e841f47dc74ce3351fb913894d7dd12002945d59` — `crates/r4y-gpu/src/host.rs`: DRED breadcrumb ownership now checks both each HostList's main list and its prelude list. Prelude markers are tracked separately from main-list notes and paired with the matching breadcrumb history. This should turn a former owner `None` into `prelude=Some(index)` if the stopped list is one of R4Y's auxiliary preludes, and show the exact converter dispatch marker if that is where it stopped.
+
+### Validation state and cautions
+
+- GitHub Actions CI run #195 for exact head `e841f47dc74ce3351fb913894d7dd12002945d59` was observed in progress at the time of this handoff update: https://github.com/cmyk-ux/r4y/actions/runs/45630873449
+- The latest file snapshots confirm all three edits are present. CI outcome is not yet known; do not claim the code compiles until run #195 completes successfully.
+- No post-change RTX 3070 game run has been performed. The pipeline-sync barrier is a correctness-oriented change that may alter ordering/performance; real title A/B remains mandatory.
+- The 3089.8 ms compute dispatch hash `42683eebec081520` remains a separate candidate to inspect. Do not assume it is the command that triggered the later TDR.
+- Keep PR #16 open. Do not merge or mark the runtime issue resolved on CI success alone.
+
+### Next steps
+
+1. Check CI #195 to completion and inspect exact failure logs if any.
+2. On success, have the user update/build the Diagnostics profile at this branch head and repeat the same title path with `R4Y_GPU_TIMING=1` and `R4Y_D3D12_DRED=1`, with `R4Y_D3D12_GBV` and `R4Y_WAVE64_CONSOLE_FLOW` unset as in section 15.
+3. Keep the next extraction narrow: the DRED `host GPU failure` line and its associated `breadcrumbs`, `a list stopped at`, `commands ... between its barriers`, and converter marker lines; plus only the `slow host list` block if a new one occurs.
+4. Compare whether pipeline sync barriers change the TDR behavior. If the device still stops in a prelude converter dispatch, investigate the conversion's resource states, source/destination footprints, and the exact stopped route before changing its shader.
+5. Inspect the `42683eebec081520` dispatch independently if it remains a multi-second outlier; it is not yet causally linked to the later removal.
