@@ -509,3 +509,11 @@ The most recent source/CI configuration commit is `1c7cc18f45e4f8b02433b4df92ff2
 - Also note that plain `pull_request:` uses GitHub's default activity types; it does not include `edited`. The default branch workflow would need `pull_request: types: [opened, synchronize, reopened, edited]` to allow a PR-body edit to start a run.
 - Verified again on the current branch tip `d78db848e13734c4458102ff9b32a821cd597af7`: `check-runs` total is 0, the Actions run query by this exact `head_sha` is empty, and combined commit status is `pending` with no statuses. No successful CI result exists for this tip.
 - The current GitHub connector exposes no action to send the workflow-dispatch POST. It can inspect existing runs and rerun jobs only. Do not ask the user to build locally as a substitute for this missing dispatch capability, and do not mark the branch green.
+
+
+#### GitHub Actions event/token caveat
+
+- GitHub's documented default activity types for plain `pull_request:` are only `opened`, `synchronize` and `reopened`; `edited` is not included. Source: [pull_request event activity types](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request).
+- GitHub also documents that PR events caused by a workflow using `GITHUB_TOKEN` do not normally start further runs: `opened`/`synchronize`/`reopened` may be created in an approval-required state, while other activity types (including `edited`) do not create a run. Source: [GITHUB_TOKEN event behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request).
+- The connected GitHub tool's token type is not exposed to this session, so do not state that this is the proven cause. It is a plausible explanation for why API-driven PR mutations did not yield a visible Actions run. The observed fact remains: no run/check is associated with the exact feature head.
+- Consequently, merely adding `edited` to the `pull_request` activity types would not reliably solve an automated-token trigger. The durable route is a dispatch-capable integration with Actions write permission, after the workflow-dispatch trigger is present on `main`, dispatching the feature ref and checking the exact SHA.
