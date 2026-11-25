@@ -204,6 +204,44 @@ fn validate_layout(
     (bytes <= u64::from(u32::MAX)).then_some(bytes)
 }
 
+/// Records one non-destructive clamp dispatch against raw GPU virtual
+/// addresses. Resource state transitions and lifetime are the caller's job.
+fn record_clamp(
+    c: &Clamp,
+    l: &ID3D12GraphicsCommandList,
+    dst: &ID3D12Resource,
+    budget: u64,
+    args_gpu: u64,
+    count_gpu: Option<u64>,
+    (kind, stride, records): (u32, u32, u32),
+) -> bool {
+    if validate_layout((kind, stride, records), args_gpu, count_gpu).is_none() {
+        return false;
+    }
+    // SAFETY: live D3D12 buffer resources.
+    let dst_gpu = unsafe { dst.GetGPUVirtualAddress() };
+    if !budget.is_multiple_of(4) || !dst_gpu.is_multiple_of(4) {
+        return false;
+    }
+    let constants = [kind, stride, records, u32::from(count_gpu.is_some())];
+    // SAFETY: an open list, a compatible root signature/pipeline, and live
+    // source, optional count, destination and budget buffer GPU addresses.
+    unsafe {
+        l.ResourceBarrier(&[uav_barrier()]);
+        l.SetComputeRootSignature(&c.root);
+        l.SetPipelineState(&c.pso);
+        l.SetComputeRoot32BitConstants(0, 4, constants.as_ptr().cast(), 0);
+        l.SetComputeRootShaderResourceView(1, args_gpu);
+        l.SetComputeRootShaderResourceView(2, count_gpu.unwrap_or(args_gpu));
+        l.SetComputeRootUnorderedAccessView(3, dst_gpu);
+        l.SetComputeRootUnorderedAccessView(4, budget);
+        if records > 0 {
+            l.Dispatch(records.div_ceil(64), 1, 1);
+        }
+    }
+    true
+}
+
 /// Records a non-destructive clamp of active indirect records into this
 /// list's reusable device-local scratch buffer. The title's argument and
 /// optional count buffers are read-only inputs; ExecuteIndirect consumes
@@ -220,41 +258,23 @@ pub(crate) fn bound(
     let c = clamp()?;
     let budget = list.budget()?;
     let dst = list.indirect_scratch(bytes)?;
-    // SAFETY: live D3D12 buffer resources.
-    let dst_gpu = unsafe { dst.GetGPUVirtualAddress() };
-    if !budget.is_multiple_of(4) || !dst_gpu.is_multiple_of(4) {
-        return None;
-    }
 
     // The source and count are shader reads. If they alias the same shadow
     // resource, the tracker coalesces these compatible read states.
     list.buffer_state(shadow, crate::host::BUFFER_SHADER_RESOURCE);
-    let count_gpu = match count {
-        Some((counter, _)) => {
-            list.buffer_state(counter, crate::host::BUFFER_SHADER_RESOURCE);
-            count_gpu.expect("count address was computed above")
-        }
-        None => gpu,
-    };
-
-    let constants = [kind, stride, records, u32::from(count.is_some())];
-    let l = &list.list;
-    // SAFETY: the open list owns the source and count shadows, scratch
-    // resource and budget for their full execution lifetime. Earlier guest
-    // UAV writes are ordered before these SRV reads; the scratch is already
-    // in UAV state via HostList::indirect_scratch.
-    unsafe {
-        l.ResourceBarrier(&[uav_barrier()]);
-        l.SetComputeRootSignature(&c.root);
-        l.SetPipelineState(&c.pso);
-        l.SetComputeRoot32BitConstants(0, 4, constants.as_ptr().cast(), 0);
-        l.SetComputeRootShaderResourceView(1, gpu);
-        l.SetComputeRootShaderResourceView(2, count_gpu);
-        l.SetComputeRootUnorderedAccessView(3, dst_gpu);
-        l.SetComputeRootUnorderedAccessView(4, budget);
-        if records > 0 {
-            l.Dispatch(records.div_ceil(64), 1, 1);
-        }
+    if let Some((counter, _)) = count {
+        list.buffer_state(counter, crate::host::BUFFER_SHADER_RESOURCE);
+    }
+    if !record_clamp(
+        c,
+        &list.list,
+        &dst,
+        budget,
+        gpu,
+        count_gpu,
+        (kind, stride, records),
+    ) {
+        return None;
     }
     list.indirect_ready();
     Some(dst)
@@ -312,5 +332,135 @@ mod tests {
     fn indirect_layout_checks_scratch_size() {
         assert_eq!(super::validate_layout((0, 16, 4), 0x1000, None), Some(64));
         assert_eq!(super::validate_layout((2, 12, 0), 0x1000, None), Some(0));
+    }
+
+    #[test]
+    fn count_limits_clamp_writes_on_warp() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
+
+        let Some(host) = crate::host::Host::new_warp() else {
+            return; // WARP is not available on this Windows installation.
+        };
+        let bytes = 3 * 16u64;
+        const SENTINEL: u32 = 0xDEAD_BEEF;
+        let source_words = [
+            0x11u32, 0x2, 0x3, 0x4,
+            0x20, 0x30, 0x40, 0x50,
+            0x60, 0x70, 0x80, 0x90,
+        ];
+        let (source, source_data) = host.shared_buffer(bytes).unwrap();
+        let (count, count_data) = host.shared_buffer(256).unwrap();
+        let (budget, budget_data) = host.shared_buffer(256).unwrap();
+        // SAFETY: these are the mapped pointers returned by shared_buffer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(source_words.as_ptr(), source_data.cast(), source_words.len());
+            count_data.cast::<u32>().write(1);
+            budget_data.cast::<u32>().write(0);
+        }
+        let dst = host.uav_buffer(bytes).unwrap();
+        let (upload, upload_data) = host.upload_buffer(bytes).unwrap();
+        // SAFETY: upload_data is the mapped upload buffer returned above.
+        unsafe {
+            std::slice::from_raw_parts_mut(upload_data.cast::<u32>(), source_words.len())
+                .fill(SENTINEL);
+        }
+        let readback_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: bytes,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            ..Default::default()
+        };
+        let readback_heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_READBACK,
+            ..Default::default()
+        };
+        let mut readback = None;
+        // SAFETY: plain creation of a readback buffer on the WARP device.
+        unsafe {
+            host.device
+                .CreateCommittedResource(
+                    &readback_heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &readback_desc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                    &mut readback,
+                )
+                .unwrap();
+        }
+        let readback = readback.unwrap();
+        let list = host.new_list().unwrap();
+        list.keep(&readback);
+        let source_gpu = unsafe { source.GetGPUVirtualAddress() };
+        let count_gpu = unsafe { count.GetGPUVirtualAddress() };
+        let budget_gpu = unsafe { budget.GetGPUVirtualAddress() };
+        let source_to_read = crate::host::transition(
+            &source,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        );
+        let count_to_read = crate::host::transition(
+            &count,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        );
+        let budget_to_uav = crate::host::transition(
+            &budget,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        );
+        let dst_to_copy = crate::host::transition(
+            &dst,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+        );
+        // SAFETY: the command list is open and all resources are alive.
+        unsafe {
+            list.list.ResourceBarrier(&[source_to_read, count_to_read, budget_to_uav, dst_to_copy]);
+            list.list.CopyBufferRegion(&dst, 0, &upload, 0, bytes);
+            list.list.ResourceBarrier(&[crate::host::transition(
+                &dst,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            )]);
+        }
+        let clamp = super::make_for(&host.device).unwrap();
+        assert!(super::record_clamp(
+            &clamp,
+            &list.list,
+            &dst,
+            budget_gpu,
+            source_gpu,
+            Some(count_gpu),
+            (0, 16, 3),
+        ));
+        // Copy the result to readback after the clamp's UAV writes.
+        // SAFETY: ordered transitions and copies in one open command list.
+        unsafe {
+            list.list.ResourceBarrier(&[crate::host::transition(
+                &dst,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+            )]);
+            list.list.CopyBufferRegion(&readback, 0, &dst, 0, bytes);
+        }
+        list.close();
+        host.execute(&[&list]);
+
+        let mut mapped = std::ptr::null_mut();
+        let range = D3D12_RANGE { Begin: 0, End: bytes as usize };
+        // SAFETY: execution completed before mapping the readback resource.
+        unsafe {
+            readback.Map(0, Some(&range), Some(&mut mapped)).unwrap();
+            let result = std::slice::from_raw_parts(mapped.cast::<u32>(), source_words.len());
+            assert_eq!(&result[..4], &[0x11, 0x2, 0x3, 0x4]);
+            assert_eq!(&result[4..], &[SENTINEL; 8]);
+            readback.Unmap(0, None);
+        }
     }
 }
