@@ -360,9 +360,53 @@ pub struct UserData {
     pub dword: u32,
 }
 
+/// The wave sizes (lanes per wave) the host GPU runs, as D3D12 reports them.
+/// A shader declaring a wave size outside this range cannot create a valid
+/// pipeline on that host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Target {
+    pub lanes_min: u32,
+    pub lanes_max: u32,
+}
+
+impl Target {
+    /// No known limit: preserve the previous behavior and let the driver decide.
+    pub const ANY: Self = Self {
+        lanes_min: 4,
+        lanes_max: 128,
+    };
+
+    /// Whether the host supports waves with this lane count.
+    pub fn runs(self, lanes: u32) -> bool {
+        (self.lanes_min..=self.lanes_max).contains(&lanes)
+    }
+
+    /// The range as bytes, for cache fingerprints.
+    pub fn key(self) -> [u8; 8] {
+        let mut key = [0; 8];
+        key[..4].copy_from_slice(&self.lanes_min.to_le_bytes());
+        key[4..].copy_from_slice(&self.lanes_max.to_le_bytes());
+        key
+    }
+}
+
+impl Default for Target {
+    fn default() -> Self {
+        Self::ANY
+    }
+}
+
 /// Translates the vertex, pixel, compute or mesh program of a console
 /// shader container.
 pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
+    translate_for(container, Target::ANY)
+}
+
+/// Translates a console shader for a host with the given wave-size range.
+pub fn translate_for(
+    container: &[u8],
+    target: Target,
+) -> Result<HostShader, ShaderError> {
     let c = Container::parse(container)?;
     let dxil = c
         .part(FourCC::DXIL)
@@ -386,10 +430,10 @@ pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
     let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok())?;
     let io = io::raise(&p, &native)?;
     let st = st?;
-    emit(&c, &native, &p, &st, &io, &res)
+    emit_for(&c, &native, &p, &st, &io, &res, target)
 }
 
-/// Emits a program whose earlier stages already ran.
+/// Emits a program whose earlier stages already ran, for any host.
 pub fn emit(
     c: &Container,
     native: &NativeProgram,
@@ -397,6 +441,20 @@ pub fn emit(
     st: &structure::Structured,
     io: &io::Io,
     res: &resource::Resources,
+) -> Result<HostShader, ShaderError> {
+    emit_for(c, native, p, st, io, res, Target::ANY)
+}
+
+/// Emits a program whose earlier stages already ran for a host with the
+/// given wave-size range.
+pub fn emit_for(
+    c: &Container,
+    native: &NativeProgram,
+    p: &ir::Program,
+    st: &structure::Structured,
+    io: &io::Io,
+    res: &resource::Resources,
+    target: Target,
 ) -> Result<HostShader, ShaderError> {
     let sig = |fourcc| -> Result<Vec<container::SigElement>, ShaderError> {
         match c.part(fourcc) {
@@ -463,6 +521,7 @@ pub fn emit(
         outputs: outputs.clone(),
         prims: prims.clone(),
         mesh_stride,
+        target,
     };
     let l = match lower::lower(&parts(st, res)) {
         // Discarded lanes kept on as helpers can read what no surviving
@@ -1198,5 +1257,68 @@ mod tests {
         let io = crate::io::raise(&p, &native).unwrap();
         // Translated or refused with a reason; it must not panic.
         let _ = super::emit(&c, &native, &p, &st, &io, &res);
+    }
+}
+
+
+#[cfg(test)]
+mod host_wave_target_tests {
+    use super::{Container, Target, emit_for};
+    use crate::native::{ComputeIo, HwStage, NativeProgram, StageIo};
+    use crate::{ShaderError, io, ir, resource, structure};
+
+    fn translate(native: &NativeProgram, target: Target) -> Result<super::HostShader, ShaderError> {
+        let bytes = crate::dxbc::build(&[]);
+        let container = Container::parse(&bytes)?;
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs)?;
+        let st = structure::structure(&p)?;
+        let resources = resource::track(&p, &native.layout, native.stage, Some(&st))?;
+        let raised = io::raise(&p, native)?;
+        emit_for(&container, native, &p, &st, &raised, &resources, target)
+    }
+
+    fn compute(words: &[u32], wave64: bool) -> NativeProgram {
+        NativeProgram {
+            stage: HwStage::Cs,
+            wave64,
+            vgprs: 8,
+            layout: vec![],
+            used: vec![],
+            io: StageIo::Cs(ComputeIo {
+                rsrc2: 0,
+                threads: [64, 1, 1],
+            }),
+            code: words.iter().flat_map(|word| word.to_le_bytes()).collect(),
+        }
+    }
+
+    #[test]
+    fn host_wave_range_refuses_only_unsupported_declared_wave_sizes() {
+        let wave64_read_lane = compute(
+            &[
+                0xD760_0000, // v_readlane_b32 s0, v0, 5
+                0x0001_0B00,
+                0x7E02_0200, // v_mov_b32 v1, s0
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let nvidia = Target { lanes_min: 32, lanes_max: 32 };
+        let rdna = Target { lanes_min: 32, lanes_max: 64 };
+
+        assert!(translate(&wave64_read_lane, Target::ANY).is_ok());
+        assert!(translate(&wave64_read_lane, rdna).is_ok());
+        assert!(matches!(
+            translate(&wave64_read_lane, nvidia),
+            Err(ShaderError::Unsupported {
+                what: "console wave64 lanes on a host without 64-lane waves",
+                ..
+            })
+        ));
+
+        // A wave64 program which does not depend on lane layout does not
+        // declare WaveSize(64) and remains usable on a 32-lane host.
+        let scalar_wave64 = compute(&[0x7E02_0300, 0xBF81_0000], true);
+        assert!(translate(&scalar_wave64, nvidia).is_ok());
     }
 }
