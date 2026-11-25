@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn clamp_limits_its_work_to_execute_indirect_count() {
-        assert!(super::SOURCE.contains("active = min(active, count_buf.Load(0))"));
+        assert!(super::SOURCE.contains("active = min(active, count_buf.Load(count_offset))"));
         assert!(super::SOURCE.contains("if (id.x >= active) return"));
         assert!(super::SOURCE.contains("ByteAddressBuffer args : register(t0)"));
         assert!(super::SOURCE.contains("RWByteAddressBuffer dst_args : register(u0)"));
