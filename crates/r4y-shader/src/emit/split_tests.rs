@@ -5,6 +5,8 @@
 //! lane t must therefore store t ^ 31 on both native wave64 and split wave32
 //! adapters.
 
+use std::mem::size_of_val;
+
 use super::host::{Dispatch, Host, Root, View};
 use super::{Container, Target, emit_for};
 use crate::native::{ComputeIo, HwStage, NativeProgram, RootParam, RootType, StageIo};
