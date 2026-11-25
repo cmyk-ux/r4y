@@ -142,7 +142,8 @@ Active implementation:
 - RTX 3070 DPP test-oracle correction: `1455d18dc2c69c0c1c6acc3fca0bfe82fdb75728` (test-only)
 - First MBCNT split-path attempt: `2f17b6f4986c815cedd96c0a27da5009551c1237` (incomplete: still matched by the whole-wave predicate)
 - MBCNT classification correction: `e5e05a66dc06580998bfa341dd682da3e019ec4e` removes that contradictory whole-wave classification
-- CI #136 for `2f17b6f` passed; new CI for `e5e05a6` is pending
+- CI #139 for branch commit `9178e6e` completed successfully, including build, tests and the dedicated D3D12-test step; hosted-runner success does not establish a real Wave32 GPU dispatch
+- Hardware fixture correction: `4cbc23f` changes the MBCNT result-copy instruction to read VGPR `v1`; `e92495c` applies the same correction to the translation-only fixture in `emit/mod.rs`
 - PR title: **Add host-aware Wave64 split and console-flow translation**. Keep the PR open until the user's RTX 3070 dispatch test and GTA VI runtime comparison have been completed.
 
 Implemented on the branch:
@@ -190,23 +191,22 @@ Next actions:
 4. Then resume the slot-zero SRV Texture1D/Texture2D provenance investigation and issue #4 descriptor virtualization. Do not confuse the Wave64 work with either descriptor issue.
 
 RTX 3070 hardware result (2026-11-25):
-- At commit \`c75fa3f\`, the user's Wave32 RTX 3070 ran the D3D12 test:
-  - Passed in-half DPP/swizzle lane-order dispatch for 64, 128 and 32 threads.
-  - Passed DPP row masks for 64 and 128 threads.
-  - Failed at \`v_mbcnt_lo_u32_b32\`, line 290. Actual output was 64 zeros followed by 64 ones; expected output was 0..31 and then 32 for lanes 32..63.
-- ISA semantics confirm the test expectation: MBCNT_LO counts set bits of S0 below the current Wave64 lane position (clamped to the low 32 bits), plus S1. With S0=-1 and S1=0, expected values are 0..31 then 32. AMD RDNA2 ISA reference: https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf
-- Commit \`2f17b6f\` attempted to route ordinary MBCNT into the in-half split and use the original console lane index. However, it left \`n.starts_with("v_mbcnt")\` in the separate \`whole\` predicate. Thus \`reads_whole\` remained true and the in-half split could not activate. The user's next run therefore reproduced the same failure; this was an incomplete code fix, not a user command problem.
-- Commit \`e5e05a66dc06580998bfa341dd682da3e019ec4e\` removes MBCNT from \`whole\`; \`reads_mask_as_data\` still keeps MBCNT whose operand is an actual EXEC/VCC mask in console-flow. Ordinary masks/constants can use the split lane-index calculation.
-- The \`e5e05a6\` fix is source-verified but not yet hardware-confirmed. Run CI and then re-test on the RTX 3070. The later ballot/cross-half/branch/loop assertions remain untested on the user's GPU.
+- On the user's latest pre-fixture-fix run, in-half DPP/swizzle lane-order dispatch passed for 64, 128 and 32 threads; DPP row masks passed for 64 and 128 threads.
+- The MBCNT assertion at line 290 returned 64 zeros then 64 ones. This was traced to a **test fixture encoding error**, not yet to production MBCNT lowering:
+  - `0xD765_0001 / 0x0001_00C1` correctly writes `v1` from `v_mbcnt_lo_u32_b32`.
+  - The following `0x7E04_0201` decodes its source field as scalar `s1` (source code `0x001`), which is the dispatch group ID in this harness. It does **not** read VGPR `v1`.
+  - Correct VOP1 source code for VGPR `v1` is `0x101`, so the instruction must be `0x7E04_0301`. This matches the observed output exactly: group 0 wrote zeros and group 1 wrote ones.
+- Commits `4cbc23f` and `e92495c` fix both copies of this fixture in `emit/split_tests.rs` and `emit/mod.rs`. No production lowering change was made for this particular failure.
+- Expected MBCNT semantics remain 0..31 then 32 for lanes 32..63 when S0=-1 and S1=0 (AMD RDNA2 ISA reference: https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf).
+- CI #139 for `9178e6e` completed green. The corrected fixture commits are newer and need their own CI run. Actual RTX 3070 validation of MBCNT and the subsequent mask-ballot/cross-half/branch/loop assertions remains pending.
 
 On the user's checkout, run:
-\`\`\`powershell
+```powershell
 git pull --ff-only origin feature/wave64-host-target
 git rev-parse --short HEAD
 cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
-\`\`\`
-Expected HEAD: \`e5e05a6\`.
-
+```
+Expected HEAD: `e92495c` or a newer descendant.
 ### 4.4 The failed hash extraction
 
 The user used:
