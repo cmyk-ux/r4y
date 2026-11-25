@@ -26,7 +26,7 @@ use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
-use windows::core::s;
+use windows::core::{s, Interface};
 
 use crate::host::{HostList, host, transition};
 use crate::object::This;
