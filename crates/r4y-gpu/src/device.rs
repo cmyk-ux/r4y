@@ -342,8 +342,8 @@ extern "system" fn check_feature_support(
                     tracing::debug!(format, error = %error, "host format support query failed");
                     return UNSUPPORTED;
                 }
-                q[1] = support.Support1.0;
-                q[2] = support.Support2.0;
+                q[1] = support.Support1.0 as u32;
+                q[2] = support.Support2.0 as u32;
                 S_OK
             }
             #[cfg(not(windows))]
@@ -621,7 +621,7 @@ mod tests {
         use windows::Win32::Graphics::Direct3D12::{
             D3D12_FEATURE_DATA_FORMAT_SUPPORT, D3D12_FEATURE_FORMAT_SUPPORT,
         };
-        use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_R8G8B8A8_UNORM};
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
 
         let Some(host) = crate::host::host() else {
             return; // no host GPU here
@@ -654,8 +654,8 @@ mod tests {
             reported,
             [
                 DXGI_FORMAT_R8G8B8A8_UNORM.0 as u32,
-                expected.Support1.0,
-                expected.Support2.0,
+                expected.Support1.0 as u32,
+                expected.Support2.0 as u32,
             ]
         );
     }
