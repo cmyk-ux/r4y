@@ -237,6 +237,70 @@ pub(crate) fn pc_format(format: u32) -> u32 {
     }
 }
 
+/// The host's typed-UAV capabilities for one concrete DXGI format:
+/// whether a typed UAV view may be created, and whether it may store.
+#[cfg(windows)]
+fn format_uav_support(format: u32) -> (bool, bool) {
+    use windows::Win32::Graphics::Direct3D12::*;
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
+
+    static KNOWN: std::sync::Mutex<Vec<(u32, (bool, bool))>> =
+        std::sync::Mutex::new(Vec::new());
+    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&(_, support)) = known.iter().find(|(f, _)| *f == format) {
+        return support;
+    }
+
+    let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+        Format: DXGI_FORMAT(format as i32),
+        ..Default::default()
+    };
+    let queried = crate::host::host().is_some_and(|host| {
+        // SAFETY: a plain feature query into a structure of its exact size.
+        unsafe {
+            host.device.CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT,
+                (&raw mut support).cast(),
+                std::mem::size_of_val(&support) as u32,
+            )
+        }
+        .is_ok()
+    });
+    let result = if queried {
+        (
+            support.Support1.0 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0 != 0,
+            support.Support2.0 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE.0 != 0,
+        )
+    } else {
+        (false, false)
+    };
+    known.push((format, result));
+    result
+}
+
+/// Whether a resource description's format can legally carry
+/// ALLOW_UNORDERED_ACCESS on this host. Typeless formats may use any
+/// supported typed member of their family; fully typed formats may not
+/// borrow support from an unrelated format with the same bit width.
+#[cfg(windows)]
+fn uav_resource_supported(format: u32) -> bool {
+    let typeless = family(format) == format && family(format + 1) == format;
+    if typeless {
+        ((format + 1)..=115)
+            .filter(|&candidate| family(candidate) == format)
+            .any(|candidate| format_uav_support(candidate).0)
+    } else {
+        format_uav_support(format).0
+    }
+}
+
+/// Whether the host can perform typed UAV stores in this format.
+#[cfg(windows)]
+pub(crate) fn typed_store_supported(format: u32) -> bool {
+    let (view, store) = format_uav_support(format);
+    view && store
+}
+
 /// The typeless format of a format's family (itself if it has none).
 pub(crate) fn family(format: u32) -> u32 {
     const FAMILIES: [(u32, u32); 22] = [
@@ -1016,6 +1080,21 @@ fn host_desc(desc: &ResourceDesc) -> Option<ResourceDesc> {
     // their unordered access views plain UNORM.
     if d.flags & UNORDERED != 0 && SRGB.iter().any(|&(srgb, _)| srgb == d.format) {
         d.format = family(d.format);
+    }
+    // The console permits UAV use for formats the host GPU may not support.
+    // Do not pass an illegal resource flag to D3D12; unsupported UAV views
+    // are rejected by the descriptor path and made null.
+    if d.flags & UNORDERED != 0 && !uav_resource_supported(d.format) {
+        static WARNED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+        let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+        if !warned.contains(&d.format) {
+            warned.push(d.format);
+            tracing::warn!(
+                format = d.format,
+                "host format has no typed UAV support; unordered views of these textures will be null"
+            );
+        }
+        d.flags &= !UNORDERED;
     }
     Some(d)
 }
