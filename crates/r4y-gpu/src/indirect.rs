@@ -323,9 +323,8 @@ mod tests {
     /// The host also accepts the compiled root signature and compute PSO.
     #[test]
     fn argument_clamp_builds_on_host() {
-        let Some(host) = crate::host::host() else {
-            return; // No usable D3D12 host adapter on this machine.
-        };
+        let host = crate::host::host()
+            .expect("the Windows CI test environment must provide D3D12 WARP");
         assert!(super::make_for(&host.device).is_ok());
     }
 
@@ -380,9 +379,8 @@ mod tests {
         use windows::Win32::Graphics::Direct3D12::*;
         use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 
-        let Some(host) = crate::host::host() else {
-            return; // No usable D3D12 host adapter on this machine.
-        };
+        let host = crate::host::host()
+            .expect("the Windows CI test environment must provide D3D12 WARP");
         let bytes = 3 * 16u64;
         const SENTINEL: u32 = 0xDEAD_BEEF;
         let source_words = [
