@@ -574,6 +574,10 @@ fn check(probes: &[Probe]) -> Vec<String> {
         }
         let mut results: Vec<(&str, Vec<[u32; 4]>)> = Vec::new();
         for (label, warp, h) in &mut hosts {
+            if let Some(reason) = h.shader_wave_limit(&shader.dxil) {
+                eprintln!("{what}: {label}: {reason}; probe skipped");
+                continue;
+            }
             match run(h, &shader, &p.inputs, p.scalar) {
                 Ok(r) => results.push((label, r)),
                 Err(e) => {
@@ -584,7 +588,8 @@ fn check(probes: &[Probe]) -> Vec<String> {
                 }
             }
         }
-        if results.len() < hosts.len() {
+        if results.is_empty() {
+            eprintln!("{what}: no available adapter supports this shader's fixed wave size");
             continue;
         }
         let mut bad = Vec::new();
