@@ -6328,7 +6328,11 @@ impl<'a> Lower<'a> {
                 } else {
                     self.cross_lane(false)?;
                 }
-                let r = self.read_lane(a, lane);
+                let r = if self.console_cf {
+                    self.console_read_lane(a, lane)
+                } else {
+                    self.read_lane(a, lane)
+                };
                 int(self, r)
             }
             "v_writelane_b32" => {
@@ -6342,7 +6346,11 @@ impl<'a> Lower<'a> {
                     None => self.s.m.i32(0),
                 };
                 self.cross_lane(false)?;
-                let me = self.lane_index();
+                let me = if self.console_cf {
+                    self.console_lane()
+                } else {
+                    self.lane_index()
+                };
                 let is = self.s.m.cmp(c, pred::EQ, me, lane);
                 let r = self.s.m.select(c, is, a, old);
                 int(self, r)
@@ -6356,6 +6364,41 @@ impl<'a> Lower<'a> {
                 // A waterfall loop's read of a descriptor dword: the lane's own.
                 let a = s(self, 0)?;
                 int(self, a)
+            }
+            "v_readfirstlane_b32" if self.console_cf => {
+                // The first lane in EXEC across the whole 64-lane console wave.
+                let value = s(self, 0)?;
+                let word = |lower: &mut Self, code: u8| -> Result<V, Why> {
+                    match lower.get(inst.read(Reg::S(code).ok_or(LANE_MASK)?)?)? {
+                        Val::I32(value) => Ok(value),
+                        _ => Err(LANE_MASK),
+                    }
+                };
+                let (low, high) = (word(self, EXEC)?, word(self, EXEC + 1)?);
+                let first_low = self.s.op(
+                    c,
+                    "unaryBits.i32",
+                    Attr::ReadNone,
+                    self.s.t.i32,
+                    32,
+                    &[low],
+                );
+                let first_high = self.s.s.op(
+                    c,
+                    "unaryBits.i32",
+                    Attr::ReadNone,
+                    self.s.t.i32,
+                    32,
+                    &[high],
+                );
+                let (zero, thirty_two) = (self.s.m.i32(0), self.s.m.i32(32));
+                let high_empty = self.s.m.cmp(c, pred::EQ, high, zero);
+                let first_high = self.s.m.bin(c, Bin::Add, first_high, thirty_two);
+                let first_high = self.s.m.select(c, high_empty, zero, first_high);
+                let low_nonempty = self.s.m.cmp(c, pred::NE, low, zero);
+                let first = self.s.m.select(c, low_nonempty, first_low, first_high);
+                let result = self.console_read_lane(value, first);
+                int(self, result)
             }
             "v_readfirstlane_b32" => {
                 let a = s(self, 0)?;
@@ -7388,7 +7431,11 @@ impl<'a> Lower<'a> {
                 } else if self.s.mesh.is_none() {
                     self.cross_lane(false)?;
                 }
-                let lane = self.lane_index();
+                let lane = if self.console_cf {
+                    self.console_lane()
+                } else {
+                    self.lane_index()
+                };
                 let below = if name == "v_mbcnt_lo_u32_b32" {
                     lane
                 } else {
