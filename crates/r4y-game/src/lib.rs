@@ -1,14 +1,13 @@
-//! Everything specific to Grand Theft Auto VI: its container formats, build
-//! identities, and the hooks we place in its code (located by per-build
-//! offsets or byte-pattern signatures). What may and may not be stored here
-//! is defined in docs/asset-policy.md.
+//! Title-specific container formats, build identities and runtime adapters.
+//! Per-build hooks are located by offsets or byte-pattern signatures. What
+//! may and may not be stored here is defined in docs/asset-policy.md.
 
 pub mod cityhash;
 pub mod pipelines;
 pub mod sgd5;
 pub mod shaderpack;
 
-/// A specific build of the Grand Theft Auto VI executable we know how to run.
+/// A title build identified by the hash of its original executable.
 #[derive(Debug, Clone, Copy)]
 pub struct KnownBuild {
     /// Our own label, e.g. "1.0.0 retail".
@@ -17,7 +16,7 @@ pub struct KnownBuild {
     pub blake3: &'static str,
 }
 
-/// Builds we support. Empty until the executable is available.
+/// Build identities explicitly supported by this runtime.
 pub const KNOWN_BUILDS: &[KnownBuild] = &[];
 
 /// Looks up a build by the BLAKE3 hash of its executable.
