@@ -132,8 +132,15 @@ The public environment variables use the `R4Y_` prefix.
 set R4Y_LOG=info
 set R4Y_D3D12_DEBUG=1
 set R4Y_D3D12_DRED=1
+set R4Y_PIPELINE_WAIT_MS=24
 r4y-run.cmd
 ```
+
+`R4Y_PIPELINE_WAIT_MS` optionally sets the total time all render threads may wait
+for unfinished host pipelines during one title frame (default: `500` ms). A
+smaller value reduces render-thread stalls but can omit draws until their
+pipelines are ready; `0` disables waiting. This is a tuning/diagnostic control,
+not a guaranteed performance improvement.
 
 A diagnostics build is required for the D3D12 debug layer, DRED and debug-only switches. The installer does not enable these in a normal release build. Diagnostic output and runtime data are stored outside the repository under `%LOCALAPPDATA%\R4Y`.
 

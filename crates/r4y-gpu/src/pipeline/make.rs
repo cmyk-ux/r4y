@@ -161,8 +161,37 @@ fn log(what: &str, key: &str, rest: impl FnOnce() -> String) {
 /// Signalled whenever a worker has made a pipeline.
 static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 
-/// Waiting allowed per title frame, over all threads.
-const BUDGET: Duration = Duration::from_millis(500);
+/// Default waiting allowed per title frame, over all threads.
+const DEFAULT_BUDGET: Duration = Duration::from_millis(500);
+
+/// The frame-wide wait budget. An opt-in environment override is useful on
+/// machines where a shorter wait is preferable to stalling the render thread
+/// for a pipeline the worker has not finished yet. A draw whose pipeline is
+/// not ready when its budget expires is still omitted.
+fn wait_budget() -> Duration {
+    static BUDGET: OnceLock<Duration> = OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let value = std::env::var("R4Y_PIPELINE_WAIT_MS").ok();
+        let budget = parse_wait_budget(value.as_deref());
+        if let Some(value) = value {
+            tracing::info!(
+                setting = %value,
+                budget_ms = budget.as_millis(),
+                "per-frame host pipeline wait budget"
+            );
+        }
+        budget
+    })
+}
+
+/// Parses a non-negative millisecond override. Missing or malformed values
+/// retain the conservative 500 ms default; zero deliberately disables waits.
+fn parse_wait_budget(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_BUDGET)
+}
 
 /// Pipelines queued and not made yet.
 static WAITING: AtomicU64 = AtomicU64::new(0);
@@ -224,7 +253,7 @@ fn wait(p: &Pending, frame: u64) {
     if FRAME.swap(frame, Ordering::Relaxed) != frame {
         WAITED_US.store(0, Ordering::Relaxed);
     }
-    let left = BUDGET.saturating_sub(Duration::from_micros(WAITED_US.load(Ordering::Relaxed)));
+    let left = wait_budget().saturating_sub(Duration::from_micros(WAITED_US.load(Ordering::Relaxed)));
     let started = Instant::now();
     let (lock, done) = &DONE;
     let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -335,6 +364,16 @@ fn drained() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipeline_wait_budget_override_is_opt_in_and_bounded_by_parse_type() {
+        assert_eq!(parse_wait_budget(None), Duration::from_millis(500));
+        assert_eq!(parse_wait_budget(Some("24")), Duration::from_millis(24));
+        assert_eq!(parse_wait_budget(Some(" 0 ")), Duration::ZERO);
+        assert_eq!(parse_wait_budget(Some("invalid")), Duration::from_millis(500));
+        assert_eq!(parse_wait_budget(Some("-1")), Duration::from_millis(500));
+        assert_eq!(parse_wait_budget(Some("18446744073709551616")), Duration::from_millis(500));
+    }
 
     /// An early start is queued once; a draw waiting for it puts it ahead,
     /// once, unless a worker has taken it.
