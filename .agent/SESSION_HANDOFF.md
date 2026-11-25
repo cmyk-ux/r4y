@@ -6,7 +6,7 @@
 >
 > **Visibility:** this file is committed to the repository. It is not private or access-controlled; anyone with repository access can read it.
 
-Last updated: 2026-11-25 (America/Sao_Paulo); PortWatch discovery/README refresh and pending repo metadata description recorded
+Last updated: 2026-11-25 (America/Sao_Paulo); RTX 3070 MBCNT classification correction committed; hardware rerun pending
 Repository: https://github.com/cmyk-ux/r4y
 Primary checkout used by the user: `C:\Users\dysu\Downloads\r4y\r4y`
 Current investigation: GTA VI runtime on NVIDIA GeForce RTX 3070 / D3D12.
@@ -138,9 +138,11 @@ Observed in the user's 2026-11-25 diagnostics run:
 Active implementation:
 - PR #16: https://github.com/cmyk-ux/r4y/pull/16
 - Branch: `feature/wave64-host-target`
-- Last Wave64 implementation commit: `f82f97dc1fc8207fc2b2e40ca5a7128a8feddf88`
-- Follow-up RTX 3070 test-oracle correction: `1455d18dc2c69c0c1c6acc3fca0bfe82fdb75728` (test-only; no production lowering changed)
-- Latest successful CI: run #123 — https://github.com/cmyk-ux/r4y/actions/runs/45568252909
+- Original Wave64 implementation commit: `f82f97dc1fc8207fc2b2e40ca5a7128a8feddf88`
+- RTX 3070 DPP test-oracle correction: `1455d18dc2c69c0c1c6acc3fca0bfe82fdb75728` (test-only)
+- First MBCNT split-path attempt: `2f17b6f4986c815cedd96c0a27da5009551c1237` (incomplete: still matched by the whole-wave predicate)
+- MBCNT classification correction: `e5e05a66dc06580998bfa341dd682da3e019ec4e` removes that contradictory whole-wave classification
+- CI #136 for `2f17b6f` passed; new CI for `e5e05a6` is pending
 - PR title: **Add host-aware Wave64 split and console-flow translation**. Keep the PR open until the user's RTX 3070 dispatch test and GTA VI runtime comparison have been completed.
 
 Implemented on the branch:
@@ -150,15 +152,15 @@ Implemented on the branch:
    - `crates/r4y-shader/src/emit/mod.rs` adds `Target`, `translate_for`, and `emit_for`; the old APIs remain compatibility wrappers.
    - `crates/r4y-gpu/src/shader_cache.rs` fingerprints the host wave range so DXIL from one adapter cannot be reused on an incompatible adapter.
 2. In-half split:
-   - Wave64 DPP and `ds_swizzle` programs whose lane references stay within each 32-lane half can be emitted as Wave32.
+   - Wave64 DPP, `ds_swizzle`, and `v_mbcnt_lo/hi` with ordinary lane-local mask operands can be emitted as Wave32. These derive their result from the current lane's original console-wave index and do not require cross-half exchange.
    - Console flattened thread IDs and DPP row-mask indexing are preserved for the upper half.
-   - This path is conservative: no native LDS, cross-half operations, mask-as-data, whole-wave sections or unsupported lane instructions.
+   - This path is conservative: no native LDS, true cross-half reads, mask-as-data, whole-wave sections or unsupported lane instructions.
 3. Console-flow split:
    - When the in-half path is insufficient, the lowerer may retry with `structure::structure_console` for exactly one console Wave64 group per thread group (at most 64 threads).
    - Every vector instruction retains its per-lane EXEC guard; scalar/wave operations and synchronization are reached by all physical lanes.
    - Branches on EXEC/VCC/SCC use a wave-wide any-lane decision, so the two host Wave32 halves follow the same branch and loop.
    - Cross-half reads and mask values are exchanged via two group-shared dwords with barriers before and after the read.
-   - Lowering covers cross-half `v_readlane`, `v_readfirstlane`, `v_writelane`, `v_mbcnt`, ballot/mask operations, and selected EXEC/VCC/SCC branch forms.
+   - Lowering covers cross-half `v_readlane`, `v_readfirstlane`, `v_writelane`, MBCNT when its source is actual EXEC/VCC mask data, ballot/mask operations, and selected EXEC/VCC/SCC branch forms.
    - A `v_readfirstlane` used only to restore a descriptor in the existing waterfall path remains a per-lane restoration; it does not trigger a real whole-wave read.
    - Path-dependent per-lane descriptor `LanePhi` values are explicitly refused in console flow.
 4. Tests:
@@ -182,23 +184,28 @@ Validation, CI run #123 on commit `f82f97d`:
 - Therefore the code and translation regressions are CI-validated; the Wave32 GPU dispatch and runtime behavior are **not yet hardware-validated**.
 
 Next actions:
-1. Pull the test-oracle correction from `feature/wave64-host-target` and rerun the D3D12 command on the RTX 3070 (PowerShell command below). It must execute, not skip, and all in-half plus console-flow kernels must pass.
-2. If the hardware test passes, build `cargo build --release --locked -p r4y`, run GTA VI with focused diagnostics, and compare previously refused hashes `13dfdd3b1136e407` and `88994c3496045f51`. Separate pipelines fixed by this work from patterns still refused by the deliberate limitations.
+1. Pull the complete MBCNT classification correction (`e5e05a6`) into the user's checkout, confirm the exact HEAD, and rerun the D3D12 command on the RTX 3070. It must execute, not skip, and all MBCNT plus subsequent console-flow kernels must pass.
+2. If the complete hardware test passes, build `cargo build --release --locked -p r4y`, run GTA VI with focused diagnostics, and compare previously refused hashes `13dfdd3b1136e407` and `88994c3496045f51`. Separate pipelines fixed by this work from patterns still refused by the deliberate limitations.
 3. If another hardware assertion fails, preserve the exact kernel/assertion and diagnose its semantics before expanding support.
 4. Then resume the slot-zero SRV Texture1D/Texture2D provenance investigation and issue #4 descriptor virtualization. Do not confuse the Wave64 work with either descriptor issue.
 
 RTX 3070 hardware result (2026-11-25):
-- The user ran `cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output` on the Wave32 adapter.
-- In-half DPP/swizzle lane-order dispatch passed for group sizes 64, 128 and 32. This is a real local D3D12 execution, unlike the hosted CI skip.
-- The DPP row-mask case passed for 64 threads and failed for 128. Actual output for lanes 64..95 was 64..95; the old expected output was 0..31. This exposed a test-oracle error: row-mask selection repeats per console Wave64 (`lane % 64`), while the value in `v0` remains the flat GroupThreadID (64..95 in the second console wave). The correct expected expression is `if console_lane < 32 { lane } else { 1 }`.
-- Inspected `lower.rs::dpp()` confirms the split path uses `console_lane()` only for the row-mask row index; the DPP source value remains the original lane value. No production change was justified by this failure.
-- Corrected the test-only expectation in `split_tests.rs` on commit `1455d18dc2c69c0c1c6acc3fca0bfe82fdb75728`. The hardware test has **not yet been rerun after this correction**. The subsequent ballot/cross-half/branch/loop assertions were not reached in the failed run and remain hardware-unverified.
+- At commit \`c75fa3f\`, the user's Wave32 RTX 3070 ran the D3D12 test:
+  - Passed in-half DPP/swizzle lane-order dispatch for 64, 128 and 32 threads.
+  - Passed DPP row masks for 64 and 128 threads.
+  - Failed at \`v_mbcnt_lo_u32_b32\`, line 290. Actual output was 64 zeros followed by 64 ones; expected output was 0..31 and then 32 for lanes 32..63.
+- ISA semantics confirm the test expectation: MBCNT_LO counts set bits of S0 below the current Wave64 lane position (clamped to the low 32 bits), plus S1. With S0=-1 and S1=0, expected values are 0..31 then 32. AMD RDNA2 ISA reference: https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf
+- Commit \`2f17b6f\` attempted to route ordinary MBCNT into the in-half split and use the original console lane index. However, it left \`n.starts_with("v_mbcnt")\` in the separate \`whole\` predicate. Thus \`reads_whole\` remained true and the in-half split could not activate. The user's next run therefore reproduced the same failure; this was an incomplete code fix, not a user command problem.
+- Commit \`e5e05a66dc06580998bfa341dd682da3e019ec4e\` removes MBCNT from \`whole\`; \`reads_mask_as_data\` still keeps MBCNT whose operand is an actual EXEC/VCC mask in console-flow. Ordinary masks/constants can use the split lane-index calculation.
+- The \`e5e05a6\` fix is source-verified but not yet hardware-confirmed. Run CI and then re-test on the RTX 3070. The later ballot/cross-half/branch/loop assertions remain untested on the user's GPU.
 
-On the user's existing checkout/branch, update and rerun:
-```powershell
+On the user's checkout, run:
+\`\`\`powershell
 git pull --ff-only origin feature/wave64-host-target
+git rev-parse --short HEAD
 cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
-```
+\`\`\`
+Expected HEAD: \`e5e05a6\`.
 
 ### 4.4 The failed hash extraction
 
