@@ -6,7 +6,7 @@
 >
 > **Visibility:** this file is committed to the repository. It is not private or access-controlled; anyone with repository access can read it.
 
-Last updated: 2026-11-25 (America/Sao_Paulo); PR #16 console-flow implementation and CI #123 recorded
+Last updated: 2026-11-25 (America/Sao_Paulo); PortWatch discovery/README refresh and pending repo metadata description recorded
 Repository: https://github.com/cmyk-ux/r4y
 Primary checkout used by the user: `C:\Users\dysu\Downloads\r4y\r4y`
 Current investigation: GTA VI runtime on NVIDIA GeForce RTX 3070 / D3D12.
@@ -223,6 +223,42 @@ If that still returns zero, print the first 12 raw lines and parse the exact cur
 - GPU-Based Validation was enabled and warned that it substantially slows creation/rendering; do not treat the very low FPS in this diagnostics run as representative performance.
 - The log shows 3,840x2,160 presentation.
 - The log's four dimension warnings and wave64 refusals are separate issues and should be triaged separately.
+
+## 4.6 Public README, repository discovery and PortWatch VI
+
+Updated on 2026-11-25:
+- `README.md` was rewritten on main (commit `13a32e759dcdc746dc9f80e8b926fa748af27341`) to describe the actual R4Y product: experimental Windows Xbox Series X|S / Scarlett GDK compatibility layer, native x64 title execution, KernelX/XGameRuntime HLE, D3D12_XS-to-host-D3D12 backend, GFX10/RDNA2 shader translation to DXIL, formats, CLI, build, tests, diagnostics and known limitations.
+- Removed unsubstantiated, configuration-specific old performance claims (~5 FPS gameplay / ~30 FPS menu).
+- Removed direct GTA VI / Grand Theft Auto wording from the public README and architecture doc; the public docs now describe a general Xbox Series compatibility runtime.
+- `docs/architecture.md` was corrected in commit `c8e7175bda6f06e60bf41a26e6121f3d36139fe0`: it no longer calls the format crate's implemented BCPack support planned and no longer labels the `r4y-game` crate GTA-specific.
+- No root files were deleted: the current scripts, workflows, legal notices, security/contributing docs, installer entry points and `.agent/SESSION_HANDOFF.md` all remain functional/relevant. The handoff is intentionally retained for cross-chat continuity.
+- The README is deliberately distinct from VIctory's source README. PortWatch compares README text against tracked projects to flag copied/re-uploaded projects, so do not paste upstream wording back into it.
+
+PortWatch VI findings:
+- Website: https://portwatch-vi.xyz/#watchlist
+- Scout code: https://github.com/4lwayz/portwatch-vi/blob/main/scripts/scout.mjs
+- Discovery configuration: https://github.com/4lwayz/portwatch-vi/blob/main/data/tracker.json
+- Relevance/substance/similarity rules: https://github.com/4lwayz/portwatch-vi/blob/main/scripts/lib/core.mjs and `scripts/lib/pipeline.mjs`.
+- The site says the scout searches every three hours and lists repos with real code as unreviewed candidates; copies are filtered out. The implementation searches GitHub for phrases including `scarlett xbox`, `xbox series`, `gdk compatibility layer`, `d3d12_xs`, `xgameruntime` and `rdna2 shader recompiler`.
+- Relevance checks metadata plus README. It accepts strong game-specific terms, or sufficient Xbox Series/GDK platform signals (e.g. Scarlett, Xbox Series, GDK, D3D12_XS, XGameRuntime, KernelX). It also requires a substantive README and filters repos whose README is too similar to known projects.
+- Current rewritten README includes the technical terms and code/test detail to satisfy those filters without naming GTA VI. A rough local application of PortWatch's scoring ingredients predicts a strong substance score (about 83 before recent-commit points); that is an estimate, not an actual scout result.
+
+Repository GitHub "About" metadata:
+- At the time inspected, the actual repository description was still only `Recomp4You`, and no topics were set.
+- The current GitHub connector exposes repository metadata reads and repository-file writes, but not the repository-settings PATCH action. Do not claim this metadata was changed.
+- Proposed description (202 characters):
+  `Experimental Xbox Series X|S (Scarlett) GDK compatibility layer for Windows: native x64 title execution, XGameRuntime/KernelX HLE, D3D12.X-to-D3D12 backend, and an RDNA2/GFX10-to-DXIL shader recompiler.`
+- Suggested topics: `xbox-series`, `scarlett`, `gdk`, `compatibility-layer`, `windows`, `d3d12`, `rdna2`, `dxil`, `shader-recompiler`, `rust`.
+- Ready-to-run command for an authenticated GitHub CLI:
+  ```powershell
+  gh repo edit cmyk-ux/r4y --description "Experimental Xbox Series X|S (Scarlett) GDK compatibility layer for Windows: native x64 title execution, XGameRuntime/KernelX HLE, D3D12.X-to-D3D12 backend, and an RDNA2/GFX10-to-DXIL shader recompiler." --add-topic xbox-series --add-topic scarlett --add-topic gdk --add-topic compatibility-layer --add-topic windows --add-topic d3d12 --add-topic rdna2 --add-topic dxil --add-topic shader-recompiler --add-topic rust
+  ```
+- This is still pending until run and re-read through GitHub repo metadata.
+
+CI after documentation changes:
+- Main commit `c8e7175bda6f06e60bf41a26e6121f3d36139fe0`, run #131: https://github.com/cmyk-ux/r4y/actions/runs/45571236280
+- Last observed status during this handoff update: Clippy normal and all-features passed; Release build was in progress. Re-check run #131 (and any newer main run) before reporting final status.
+- PR #16 feature head `444e2570f1af854a4d16e09308607fa5482c68f2`, run #129 passed: https://github.com/cmyk-ux/r4y/actions/runs/45569300257. Its D3D12 body had been skipped on hosted runner without Wave32/64; the user's RTX 3070 dispatch remains the next runtime validation.
 
 ## 5. Immediate priority order
 
