@@ -44,6 +44,8 @@ jobs:
         run: ./scripts/install.ps1 -OptionString '--test-native-output'
       # The version and components pinned in rust-toolchain.toml.
       - run: rustup toolchain install
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
