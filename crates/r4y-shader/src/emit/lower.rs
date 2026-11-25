@@ -72,6 +72,8 @@ pub(crate) struct Parts<'a> {
     pub prims: Vec<SigElement>,
     /// Mesh: what the group id arrives multiplied by.
     pub mesh_stride: u32,
+    /// Wave sizes supported by the host GPU.
+    pub target: super::Target,
 }
 
 enum Stop {
@@ -1348,6 +1350,20 @@ impl<'a> Lower<'a> {
     }
 
     fn run(mut self) -> Result<Lowered, Stop> {
+        if let Some(wave) = self.s.wave_size
+            && !self.x.target.runs(wave)
+        {
+            return Err(unsupported(
+                0,
+                match (wave, self.console_lanes) {
+                    (64, true) => "console wave64 lanes on a host without 64-lane waves",
+                    (64, false) => {
+                        "a wave64 group sharing LDS without barriers on a host without 64-lane waves"
+                    }
+                    _ => "a console wave size the host does not run",
+                },
+            ));
+        }
         let p = self.x.p;
         let order = crate::ir::reverse_postorder(&p.blocks);
         for (n, &b) in order.iter().enumerate() {
@@ -9747,6 +9763,7 @@ mod tests {
             outputs: vec![],
             prims: vec![],
             mesh_stride: 0,
+            target: super::super::Target::ANY,
         })
         .map(|_| ())
     }
@@ -9797,6 +9814,7 @@ mod tests {
             outputs: vec![],
             prims: vec![],
             mesh_stride: 0,
+            target: super::super::Target::ANY,
         })
     }
 
@@ -9951,6 +9969,7 @@ mod tests {
             outputs: vec![],
             prims: vec![],
             mesh_stride: 0,
+            target: super::super::Target::ANY,
         }).unwrap();
 
         let container =
