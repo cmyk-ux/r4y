@@ -1292,6 +1292,36 @@ mod host_wave_target_tests {
         }
     }
 
+    fn wave_size(dxil: &[u8]) -> Option<u32> {
+        let container = Container::parse(dxil).ok()?;
+        let psv = container.part(crate::dxbc::FourCC::PSV0)?.data;
+        let min = crate::dxbc::u32_at(psv, 4 + 16).ok()?;
+        let max = crate::dxbc::u32_at(psv, 4 + 20).ok()?;
+        (min == max).then_some(min)
+    }
+
+    #[test]
+    fn in_half_dpp_and_swizzle_translate_to_32_lanes_on_nvidia() {
+        let native = compute(
+            &[
+                0xD8D4_401F,
+                0x0100_0000, // ds_swizzle_b32 v1, v0: xor 16
+                0x7E04_02FA,
+                0xFF01_4001, // v_mov_b32_dpp v2, v1: row mirror
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let nvidia = Target { lanes_min: 32, lanes_max: 32 };
+        let rdna = Target { lanes_min: 32, lanes_max: 64 };
+
+        let split = translate(&native, nvidia).unwrap();
+        assert_eq!(wave_size(&split.dxil), Some(32));
+
+        let native_wave64 = translate(&native, rdna).unwrap();
+        assert_eq!(wave_size(&native_wave64.dxil), Some(64));
+    }
+
     #[test]
     fn host_wave_range_refuses_only_unsupported_declared_wave_sizes() {
         let wave64_read_lane = compute(
