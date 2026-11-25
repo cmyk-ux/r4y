@@ -6,7 +6,7 @@
 >
 > **Visibility:** this file is committed to the repository. It is not private or access-controlled; anyone with repository access can read it.
 
-Last updated: 2026-11-25 (America/Sao_Paulo); RTX 3070 MBCNT failure diagnosed and split-path correction committed; hardware rerun pending
+Last updated: 2026-11-25 (America/Sao_Paulo); RTX 3070 MBCNT classification correction committed; hardware rerun pending
 Repository: https://github.com/cmyk-ux/r4y
 Primary checkout used by the user: `C:\Users\dysu\Downloads\r4y\r4y`
 Current investigation: GTA VI runtime on NVIDIA GeForce RTX 3070 / D3D12.
@@ -140,9 +140,9 @@ Active implementation:
 - Branch: `feature/wave64-host-target`
 - Original Wave64 implementation commit: `f82f97dc1fc8207fc2b2e40ca5a7128a8feddf88`
 - RTX 3070 DPP test-oracle correction: `1455d18dc2c69c0c1c6acc3fca0bfe82fdb75728` (test-only)
-- MBCNT split-path correction: `2f17b6f4986c815cedd96c0a27da5009551c1237` (production lowering)
-- Latest successful CI before the MBCNT correction: run #135 — https://github.com/cmyk-ux/r4y/actions/runs/45573039574
-- CI run #136 for `2f17b6f` is in progress: https://github.com/cmyk-ux/r4y/actions/runs/45574580519
+- First MBCNT split-path attempt: `2f17b6f4986c815cedd96c0a27da5009551c1237` (incomplete: still matched by the whole-wave predicate)
+- MBCNT classification correction: `e5e05a66dc06580998bfa341dd682da3e019ec4e` removes that contradictory whole-wave classification
+- CI #136 for `2f17b6f` passed; new CI for `e5e05a6` is pending
 - PR title: **Add host-aware Wave64 split and console-flow translation**. Keep the PR open until the user's RTX 3070 dispatch test and GTA VI runtime comparison have been completed.
 
 Implemented on the branch:
@@ -184,27 +184,28 @@ Validation, CI run #123 on commit `f82f97d`:
 - Therefore the code and translation regressions are CI-validated; the Wave32 GPU dispatch and runtime behavior are **not yet hardware-validated**.
 
 Next actions:
-1. Pull the MBCNT split-path correction (`2f17b6f`) into the user's checkout and rerun the D3D12 command on the RTX 3070. It must execute, not skip, and all MBCNT plus subsequent console-flow kernels must pass.
+1. Pull the complete MBCNT classification correction (`e5e05a6`) into the user's checkout, confirm the exact HEAD, and rerun the D3D12 command on the RTX 3070. It must execute, not skip, and all MBCNT plus subsequent console-flow kernels must pass.
 2. If the complete hardware test passes, build `cargo build --release --locked -p r4y`, run GTA VI with focused diagnostics, and compare previously refused hashes `13dfdd3b1136e407` and `88994c3496045f51`. Separate pipelines fixed by this work from patterns still refused by the deliberate limitations.
 3. If another hardware assertion fails, preserve the exact kernel/assertion and diagnose its semantics before expanding support.
 4. Then resume the slot-zero SRV Texture1D/Texture2D provenance investigation and issue #4 descriptor virtualization. Do not confuse the Wave64 work with either descriptor issue.
 
 RTX 3070 hardware result (2026-11-25):
-- After updating to \`c75fa3f\`, the user reran \`cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output\` on the Wave32 RTX 3070.
-- Passed on actual D3D12 hardware:
-  - In-half DPP/swizzle lane-order dispatch for 64, 128 and 32 threads.
-  - DPP row masks for both 64 and 128 threads.
-- The next assertion failed at \`v_mbcnt_lo_u32_b32\`, line 290. Actual output was 64 zeros followed by 64 ones; the test expected each console Wave64 to produce 0..31 for lanes 0..31 and 32 for lanes 32..63.
-- ISA semantics confirm the oracle: MBCNT_LO counts bits in S0 below the current Wave64 lane position (clamped to the low 32 bits), plus S1. With S0=-1 and S1=0, expected values are 0..31 then 32. AMD RDNA2 ISA reference: https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf
-- Source diagnosis: \`lower.rs\` had classified every \`v_mbcnt\` as a whole-wave operation, forcing even ordinary lane-local masks through \`structure_console\`/console-flow. MBCNT with an ordinary value such as -1 can instead be computed per lane from the reconstructed console lane index, like DPP row masks; only when the operand is an actual EXEC/VCC mask read as data does it need the mask-data/console-flow path.
-- Commit \`2f17b6f4986c815cedd96c0a27da5009551c1237\` moves \`v_mbcnt_lo/hi\` with ordinary operands into the in-half split classification and selects \`console_lane()\` for MBCNT whenever the shader is in split or console-flow mode. \`reads_mask_as_data\` still keeps real mask-as-data cases on the console-flow path.
-- This is a source-backed diagnosis and a targeted production correction, **not yet hardware-confirmed**. CI #136 is running; hosted CI cannot replace the RTX test. Later mask ballot/cross-half/branch/loop assertions have not yet been reached on the user's adapter.
+- At commit \`c75fa3f\`, the user's Wave32 RTX 3070 ran the D3D12 test:
+  - Passed in-half DPP/swizzle lane-order dispatch for 64, 128 and 32 threads.
+  - Passed DPP row masks for 64 and 128 threads.
+  - Failed at \`v_mbcnt_lo_u32_b32\`, line 290. Actual output was 64 zeros followed by 64 ones; expected output was 0..31 and then 32 for lanes 32..63.
+- ISA semantics confirm the test expectation: MBCNT_LO counts set bits of S0 below the current Wave64 lane position (clamped to the low 32 bits), plus S1. With S0=-1 and S1=0, expected values are 0..31 then 32. AMD RDNA2 ISA reference: https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna2-shader-instruction-set-architecture.pdf
+- Commit \`2f17b6f\` attempted to route ordinary MBCNT into the in-half split and use the original console lane index. However, it left \`n.starts_with("v_mbcnt")\` in the separate \`whole\` predicate. Thus \`reads_whole\` remained true and the in-half split could not activate. The user's next run therefore reproduced the same failure; this was an incomplete code fix, not a user command problem.
+- Commit \`e5e05a66dc06580998bfa341dd682da3e019ec4e\` removes MBCNT from \`whole\`; \`reads_mask_as_data\` still keeps MBCNT whose operand is an actual EXEC/VCC mask in console-flow. Ordinary masks/constants can use the split lane-index calculation.
+- The \`e5e05a6\` fix is source-verified but not yet hardware-confirmed. Run CI and then re-test on the RTX 3070. The later ballot/cross-half/branch/loop assertions remain untested on the user's GPU.
 
 On the user's checkout, run:
 \`\`\`powershell
 git pull --ff-only origin feature/wave64-host-target
+git rev-parse --short HEAD
 cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
 \`\`\`
+Expected HEAD: \`e5e05a6\`.
 
 ### 4.4 The failed hash extraction
 
