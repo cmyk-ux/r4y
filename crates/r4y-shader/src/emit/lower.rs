@@ -645,14 +645,21 @@ impl<'a> Lower<'a> {
         if let StageIo::Cs(cs) = x.native.io {
             s.threads = Some(cs.threads);
             s.lds_dwords = cs.lds_bytes() / 4;
-            // DPP and ds_swizzle only address a 32-lane half. They can run
-            // unchanged on two host waves when a console wave64 is split.
+            // DPP, ds_swizzle and mbcnt can be reconstructed from the
+            // current lane's original console-wave index. They need no
+            // exchange with the other 32-lane half when their mask operand
+            // is an ordinary value; reads_mask_as_data below keeps actual
+            // EXEC/VCC mask-as-data uses on the console-flow path.
             let in_half = |i: &Inst| {
                 i.name().starts_with("ds_swizzle")
+                    || matches!(
+                        i.name(),
+                        "v_mbcnt_lo_u32_b32" | "v_mbcnt_hi_u32_b32"
+                    )
                     || matches!(&i.fields, Fields::Valu(v) if v.dpp.is_some())
             };
             // These operations (and masks read as numbers) can reach the
-            // other half, so they still require a native 64-lane wave.
+            // other half and need the console-flow exchange path.
             let whole = |i: &Inst| {
                 let n = i.name();
                 // Waterfall descriptor reads are restored per lane below;
@@ -7441,7 +7448,11 @@ impl<'a> Lower<'a> {
                 } else if self.s.mesh.is_none() {
                     self.cross_lane(false)?;
                 }
-                let lane = if self.console_cf {
+                // In the in-half split, mbcnt is still indexed by the
+                // original console lane (0..63), not the host lane (0..31).
+                // Console-flow uses the same index when a mask operand
+                // genuinely has to be exchanged between the two halves.
+                let lane = if self.split || self.console_cf {
                     self.console_lane()
                 } else {
                     self.lane_index()
