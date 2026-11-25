@@ -9034,7 +9034,11 @@ impl<'a> Lower<'a> {
                 let stride = self.view_stride(src)?;
                 let rows = self.s.m.bin(c, Bin::Mul, i, stride);
                 off = self.s.m.bin(c, Bin::Add, rows, off);
-                structured_stride = Some(stride);
+                // Resource-heap buffer descriptors have runtime-dependent
+                // strides. We have already converted the element index to a
+                // byte offset; emit RawBuffer coordinates (one byte offset),
+                // not StructuredBuffer coordinates whose stride is fixed in
+                // DXIL resource metadata.
                 None
             }
             index => index,
