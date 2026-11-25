@@ -13,15 +13,15 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates
-victory-core = { path = "crates/victory-core" }
-victory-pe = { path = "crates/victory-pe" }
-victory-loader = { path = "crates/victory-loader" }
-victory-hle = { path = "crates/victory-hle" }
-victory-gpu = { path = "crates/victory-gpu" }
-victory-shader = { path = "crates/victory-shader" }
-victory-formats = { path = "crates/victory-formats" }
-victory-pipeline = { path = "crates/victory-pipeline" }
-victory-game = { path = "crates/victory-game" }
+r4y-core = { path = "crates/r4y-core" }
+r4y-pe = { path = "crates/r4y-pe" }
+r4y-loader = { path = "crates/r4y-loader" }
+r4y-hle = { path = "crates/r4y-hle" }
+r4y-gpu = { path = "crates/r4y-gpu" }
+r4y-shader = { path = "crates/r4y-shader" }
+r4y-formats = { path = "crates/r4y-formats" }
+r4y-pipeline = { path = "crates/r4y-pipeline" }
+r4y-game = { path = "crates/r4y-game" }
 
 # External crates
 anyhow = "1.0.104"
@@ -60,7 +60,7 @@ opt-level = 2
 debug = "line-tables-only"
 
 # The development build: release code generation plus the `diagnostics`
-# feature (`cargo build --profile diag -p victory --features diagnostics`),
+# feature (`cargo build --profile diag -p r4y --features diagnostics`),
 # kept in its own folder so it does not evict the plain release build.
 [profile.diag]
 inherits = "release"

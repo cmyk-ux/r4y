@@ -1,27 +1,42 @@
 # R4Y — Recompile4You
 
-R4Y is a single, self-contained Windows runtime for running Xbox Series X|S title builds from files the user already owns and can read on disk.
+R4Y is an experimental Windows compatibility engine for running Xbox Series X|S title builds from game files that users already own and can read on disk.
 
-**The runtime lives in this repository.** R4Y does not download VIctory, XCL, or another engine during installation, and there is no runtime backend selector. The Rust workspace contains the loader, HLE services, D3D12 backend, shader translator, format handling, tests and tools.
+R4Y is maintained as a single, self-contained Rust workspace. The loader, console API layer, D3D12 backend, shader translator, format handling, command-line tools, tests and Windows installer are developed together. Installation does not download or select a separate runtime.
 
-> **Status: experimental.** Boot, menus and portions of the rendering path are under active development. Full gameplay compatibility, stable world rendering and good performance are not guaranteed. See [the source map](docs/SOURCE_MAP.md) for current known limitations, issue history and integration priorities.
+## Project approach
+
+R4Y has its own workspace structure, runtime integration and implementation decisions. Development is guided by reproducible bug reports, public technical discussions, targeted experiments and regression tests. Relevant findings are evaluated for the R4Y architecture, adapted locally and tested where a reproducible test is available; external workarounds are not assumed to apply automatically.
+
+Keyboard input is handled through R4Y's integrated input path. Its current behavior follows a familiar console-compatibility model while remaining part of the R4Y runtime.
+
+> **Status: experimental.** Boot, menus and portions of the rendering path are under active development. Compatibility, stability and performance vary by title build, hardware and driver. The figures below are early observations from the current local test configuration, not universal benchmarks or performance guarantees.
+
+## Current performance observations
+
+| Runtime area | Observed average |
+|---|---:|
+| Gameplay | approximately **5 FPS** |
+| In-game menu | approximately **30 FPS** |
+
+These results are configuration-specific and should be treated as an early baseline. Actual performance depends on hardware, graphics drivers, title build, scene complexity and runtime configuration.
 
 R4Y does not distribute game files, keys, executables, shaders, saves or other copyrighted game assets. It does not decrypt files or bypass platform protection. Users must provide their own legally obtained files, already readable on disk.
 
-## What is in this repository
+## Repository layout
 
 | Area | Location | Purpose |
 |---|---|---|
-| User-facing executable | `apps/victory` | R4Y CLI: inspect, census, shader tools, config and run |
-| PE loader | `crates/victory-loader`, `crates/victory-pe` | Map and bind the title's executable and title DLLs |
-| Console runtime | `crates/victory-hle` | Xbox API/HLE implementations and host pass-through |
-| D3D12 backend | `crates/victory-gpu` | Resource copies, descriptors, command lists and host GPU execution |
-| Shader translator | `crates/victory-shader` | RDNA2 decoding and DXIL emission |
-| Formats and title data | `crates/victory-formats`, `crates/victory-game` | Texture/audio/archive formats and GTA VI pipeline metadata |
-| Cache and configuration | `crates/victory-pipeline`, `crates/victory-core` | Content-addressed cache, logs, paths and runtime policy |
+| User-facing executable | `apps/r4y` | R4Y CLI: inspect, census, shader tools, configuration and run |
+| PE loader | `crates/r4y-loader`, `crates/r4y-pe` | Map and bind the title executable and title DLLs |
+| Console runtime | `crates/r4y-hle` | Xbox API/HLE implementations and host pass-through |
+| D3D12 backend | `crates/r4y-gpu` | Resource copies, descriptors, command lists and host GPU execution |
+| Shader translator | `crates/r4y-shader` | RDNA2 decoding and DXIL emission |
+| Formats and title data | `crates/r4y-formats`, `crates/r4y-game` | Texture/audio/archive formats and title-specific pipeline metadata |
+| Cache and configuration | `crates/r4y-pipeline`, `crates/r4y-core` | Content-addressed cache, logs, paths and runtime policy |
 | Repository tools | `xtask`, `tests` | Asset policy, hooks and tests |
 
-Internal crate names remain VIctory-derived to preserve the workspace boundaries and reduce mechanical churn. The product executable and CLI are named **R4Y**.
+The public application, internal crates, configuration, launchers and user-data directories use the **R4Y** identity.
 
 ## Quick start
 
@@ -38,11 +53,11 @@ Internal crate names remain VIctory-derived to preserve the workspace boundaries
    r4y.cmd
    ```
 
-3. The installer checks the Windows/Rust/MSVC prerequisites, lets you choose the folder and executable from your own game files, writes local configuration under `%LOCALAPPDATA%\R4Y`, builds `r4y.exe`, and validates the selected executable.
+3. The installer checks Windows, Rust and MSVC prerequisites, lets you select your game folder and executable, writes local configuration under `%LOCALAPPDATA%\R4Y`, builds `r4y.exe` and validates the selected executable.
 
 4. Start the configured title with `r4y-run.cmd`. The game directory is not modified.
 
-The first Rust build downloads crates and compiles the workspace; later builds reuse Cargo's target directory and the runtime's shader/pipeline caches.
+The first Rust build downloads dependencies and compiles the workspace. Later builds reuse Cargo's target directory and the runtime's shader and pipeline caches.
 
 ## Installer options
 
@@ -58,15 +73,17 @@ r4y.cmd [--dry-run] [--no-build] [--no-run] [--yes] [--test] [--diagnostics] [--
   --help         Show the available options
 ```
 
-No backend is downloaded or selected. These options only control the one R4Y workspace.
+These options control the single R4Y workspace. No additional runtime is downloaded or selected.
 
 ## Manual build
 
-Requirements: Windows 10/11 x64, a CPU with AVX2, Rust toolchain pinned by `rust-toolchain.toml`, Visual Studio C++ Build Tools and a Windows SDK. A D3D12 adapter with Shader Model 6.6 and the required mesh/wave features is needed for the relevant rendering paths. DXC 1.8+ is recommended for offline shader translation and validation.
+Requirements: Windows 10/11 x64, a CPU with AVX2, the Rust toolchain pinned by `rust-toolchain.toml`, Visual Studio C++ Build Tools and a Windows SDK. A D3D12 adapter with Shader Model 6.6 and the required mesh/wave features is needed for the relevant rendering paths. DXC 1.8+ is recommended for offline shader translation and validation.
 
 ```powershell
 rustup toolchain install
+cargo xtask policy
 cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --release --locked -p r4y
 ```
 
@@ -94,11 +111,11 @@ target\release\r4y.exe config
 target\release\r4y.exe run .\path\to\game.exe --execute
 ```
 
-Copy [`r4y.example.toml`](r4y.example.toml) to `%LOCALAPPDATA%\R4Y\r4y.toml` or let the installer generate it. `R4Y_CONFIG` selects the file. `VICTORY_CONFIG` remains a legacy alias.
+Copy [`r4y.example.toml`](r4y.example.toml) to `%LOCALAPPDATA%\R4Y\r4y.toml` or let the installer generate it. `R4Y_CONFIG` selects the configuration file.
 
 ## Diagnostics
 
-The public environment variables use the `R4Y_` prefix. The launcher maps the GPU/translator controls to their existing internal names for compatibility.
+The public environment variables use the `R4Y_` prefix.
 
 ```cmd
 set R4Y_LOG=info
@@ -109,16 +126,15 @@ r4y-run.cmd
 
 A diagnostics build is required for the D3D12 debug layer, DRED and debug-only switches. The installer does not enable these in a normal release build. Diagnostic output and runtime data are stored outside the repository under `%LOCALAPPDATA%\R4Y`.
 
-## Contributing
+## Development documentation
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [source/integration map](docs/SOURCE_MAP.md) before changing runtime behavior. GPU fixes should include the hardware, driver, title build, run duration, debug-layer/DRED output and before/after result. Offline shader-validation counts are useful, but they are not a substitute for a runtime test.
+- [Architecture and runtime flow](docs/architecture.md)
+- [Internal source map](docs/SOURCE_MAP.md)
+- [Integration and testing boundaries](docs/INTEGRATION.md)
+- [Asset and test-data policy](docs/asset-policy.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 
-Do not commit game files, dumps, generated shaders, caches, logs containing title data or personal absolute paths. Issues and pull requests are welcome.
+## License and notices
 
-## Credits
-
-R4Y consolidates work from the VIctory project and selectively incorporates or adapts fixes documented in [NOTICE.md](NOTICE.md) and [docs/SOURCE_MAP.md](docs/SOURCE_MAP.md). XCL and Leonida inform specific algorithms and installer behavior; they are not separate engines bundled into R4Y.
-
-## License
-
-See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
+R4Y is distributed under GPL-3.0-or-later. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md) for license information and required source attributions.

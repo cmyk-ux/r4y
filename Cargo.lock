@@ -652,18 +652,18 @@ dependencies = [
  "clap",
  "memchr",
  "tracing",
- "victory-core",
- "victory-game",
- "victory-gpu",
- "victory-hle",
- "victory-loader",
- "victory-pe",
- "victory-shader",
+ "r4y-core",
+ "r4y-game",
+ "r4y-gpu",
+ "r4y-hle",
+ "r4y-loader",
+ "r4y-pe",
+ "r4y-shader",
  "walkdir",
 ]
 
 [[package]]
-name = "victory-core"
+name = "r4y-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -675,11 +675,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "victory-formats"
+name = "r4y-formats"
 version = "0.1.0"
 
 [[package]]
-name = "victory-game"
+name = "r4y-game"
 version = "0.1.0"
 dependencies = [
  "memchr",
@@ -687,7 +687,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "victory-gpu"
+name = "r4y-gpu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -695,32 +695,32 @@ dependencies = [
  "miniz_oxide",
  "tempfile",
  "tracing",
- "victory-formats",
- "victory-pipeline",
- "victory-shader",
+ "r4y-formats",
+ "r4y-pipeline",
+ "r4y-shader",
  "windows",
  "windows-sys",
 ]
 
 [[package]]
-name = "victory-hle"
+name = "r4y-hle"
 version = "0.1.0"
 dependencies = [
  "miniz_oxide",
  "opus-pure",
  "tempfile",
  "tracing",
- "victory-formats",
- "victory-gpu",
- "victory-loader",
- "victory-pe",
+ "r4y-formats",
+ "r4y-gpu",
+ "r4y-loader",
+ "r4y-pe",
  "windows",
  "windows-core",
  "windows-sys",
 ]
 
 [[package]]
-name = "victory-loader"
+name = "r4y-loader"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -728,13 +728,13 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
- "victory-core",
- "victory-pe",
+ "r4y-core",
+ "r4y-pe",
  "windows-sys",
 ]
 
 [[package]]
-name = "victory-pe"
+name = "r4y-pe"
 version = "0.1.0"
 dependencies = [
  "object",
@@ -742,18 +742,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "victory-pipeline"
+name = "r4y-pipeline"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
  "tempfile",
  "tracing",
- "victory-core",
+ "r4y-core",
 ]
 
 [[package]]
-name = "victory-shader"
+name = "r4y-shader"
 version = "0.1.0"
 dependencies = [
  "miniz_oxide",
