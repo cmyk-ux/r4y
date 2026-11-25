@@ -6,6 +6,15 @@
 
 > **Read the branch distinction first.** The default branch and the active research branch do not contain the same state. The main snapshot inspected for this report was **b460f7700ad95e3ba1db245233740cd642c4ceb0**. The active Wave64 research is in **PR #16**, branch **feature/wave64-host-target**, inspected at **0c2e3ec638be0c113011222b3acc6c6454384ca9**. PR #16 is open and its changes are not merged into main.
 
+## Start here — the most substantial unmerged work
+
+The most important experimental implementation is **[PR #16 — Add host-aware Wave64 split and console-flow translation](https://github.com/cmyk-ux/r4y/pull/16)**. It is intentionally **not merged into `main`**; open the PR to inspect the full implementation, its commit history, review context, and validation notes.
+
+In particular, PR #16 contains the partial Wave64-to-Wave32 translation path, including the bounded cross-half console-flow fallback. Its synthetic D3D12 dispatch tests were run successfully on a physical RTX 3070, and two previously refused title compute pipelines were later observed being created and bound. This is partial support, not general Wave64 compatibility or a claim that the title is playable. The PR also contains related diagnostics and other experimental GPU/runtime fixes.
+
+**For a quick handoff:** read this research record for the findings and limitations, then inspect [PR #16](https://github.com/cmyk-ux/r4y/pull/16) for the code. No merge is required to review or reuse that branch.
+
+
 ## Executive status
 
 R4Y is a Rust-based experimental Windows compatibility runtime for Xbox Series X|S / Scarlett software. It combines native x64 title execution, selected KernelX and XGameRuntime HLE, a D3D12.X-to-host-D3D12 backend, and GFX10/RDNA2 shader translation to DXIL.
