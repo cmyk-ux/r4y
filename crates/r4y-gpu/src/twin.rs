@@ -378,7 +378,14 @@ impl Twin {
     /// the copy states (tracked by the list, or from their real states in
     /// a prelude). True if it ran our conversion, which replaces the
     /// list's compute root signature and pipeline.
-    pub(crate) fn copy(&self, l: &ID3D12GraphicsCommandList, depth: &Arc<HostTexture>, to_depth: bool, mv: &mut Mover) -> bool {
+    pub(crate) fn copy(
+        &self,
+        l: &ID3D12GraphicsCommandList,
+        depth: &Arc<HostTexture>,
+        to_depth: bool,
+        mv: &mut Mover,
+        note: &mut dyn FnMut(String),
+    ) -> bool {
         let (src, dst) = if to_depth { (COPY_SOURCE, COPY_DEST) } else { (COPY_DEST, COPY_SOURCE) };
         let mut barriers: Vec<_> = self.planes.iter().filter_map(|p| mv(p, src)).collect();
         barriers.extend(mv(depth, dst));
@@ -432,6 +439,16 @@ impl Twin {
                     let (t, d) = (r.twin.Footprint, d);
                     let constants = [t.Width, t.Height, t.RowPitch, r.twin.Offset as u32, d.Footprint.RowPitch, d.Offset as u32, u32::from(to_depth), 0];
                     l.SetComputeRoot32BitConstants(0, 8, constants.as_ptr().cast(), 0);
+                    note(format!(
+                        "depth-twin conversion {} subresource={} {}x{} format={} source_pitch={} destination_pitch={}",
+                        if to_depth { "twin-to-depth" } else { "depth-to-twin" },
+                        r.depth_sub,
+                        t.Width,
+                        t.Height,
+                        d.Format.0,
+                        t.RowPitch,
+                        d.RowPitch,
+                    ));
                     l.Dispatch(t.Width.div_ceil(2).div_ceil(64), t.Height, 1);
                 }
                 l.ResourceBarrier(&[uav_barrier(), state(UNORDERED_ACCESS as i32, COPY_SOURCE as i32)]);
