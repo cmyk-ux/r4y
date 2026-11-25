@@ -437,6 +437,8 @@ pub(crate) struct HostList {
     /// The work its indirect executions may still do (`indirect`): a
     /// shader-writable word, zeroed when the list is submitted.
     budget: OnceLock<Option<(ID3D12Resource, usize)>>,
+    /// The budget buffer's explicit state in the currently recorded list.
+    budget_state: Mutex<u32>,
     /// Reusable device-local output for the indirect argument clamp. The
     /// state persists across list resets; retired buffers stay alive until
     /// the reset after the submission fence completes.
@@ -693,6 +695,7 @@ impl Host {
                 prelude: (prelude_allocator, prelude),
                 pipelines: Mutex::default(),
                 budget: OnceLock::new(),
+                budget_state: Mutex::new(0),
                 indirect_args: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
                 notes: Mutex::default(),
@@ -1219,6 +1222,24 @@ impl HostList {
             // Keep the Arc<Shadow> entries alive until reset(), which is
             // called only after the submission fence has completed.
         }
+        // The per-list budget is also an explicitly transitioned UAV.
+        // Return it to COMMON so this closed list can be safely replayed.
+        {
+            let mut state = self.budget_state.lock().unwrap_or_else(|e| e.into_inner());
+            if *state != 0
+                && let Some((buffer, _)) = self.budget.get().and_then(Option::as_ref)
+            {
+                // SAFETY: the list is open and the budget buffer is live.
+                unsafe {
+                    self.list.ResourceBarrier(&[transition(
+                        buffer,
+                        D3D12_RESOURCE_STATES(*state as i32),
+                        D3D12_RESOURCE_STATE_COMMON,
+                    )]);
+                }
+                *state = 0;
+            }
+        }
         // Indirect scratch buffers use explicit transitions, so they do not
         // decay to COMMON after submission. Return every buffer used by this
         // recording to COMMON before close: the closed list may be submitted
@@ -1718,22 +1739,26 @@ impl HostList {
             .budget
             .get_or_init(|| {
                 let (buffer, data) = host()?.shared_buffer(256)?;
-                // This mapped UAV buffer has one persistent explicit state.
-                // Unlike an implicitly promoted buffer, an explicitly
-                // transitioned resource does not decay to COMMON after
-                // ExecuteCommandLists. Record COMMON -> UAV only on creation.
-                // SAFETY: the list is open and the newly created buffer is
-                // live in COMMON state.
-                unsafe {
-                    self.list.ResourceBarrier(&[transition(
-                        &buffer,
-                        D3D12_RESOURCE_STATE_COMMON,
-                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                    )]);
-                }
                 Some((buffer, data as usize))
             })
             .as_ref()?;
+        {
+            let mut state = self.budget_state.lock().unwrap_or_else(|e| e.into_inner());
+            if *state != BUFFER_UAV {
+                // Buffers promoted implicitly from COMMON decay after a
+                // submission, but this UAV use is explicit. HostList::close
+                // returns it to COMMON so a closed list can be replayed.
+                // SAFETY: the list is open and the budget buffer is live.
+                unsafe {
+                    self.list.ResourceBarrier(&[transition(
+                        buffer,
+                        D3D12_RESOURCE_STATES(*state as i32),
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    )]);
+                }
+                *state = BUFFER_UAV;
+            }
+        }
         let mut deferred = self.deferred();
         if !deferred.budget_zeroed {
             deferred.budget_zeroed = true;
