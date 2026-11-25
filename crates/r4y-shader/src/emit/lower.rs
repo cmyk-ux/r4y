@@ -670,7 +670,6 @@ impl<'a> Lower<'a> {
                         .first()
                         .is_some_and(|w| x.res.waterfall.reads.contains(&w.1));
                 n.contains("permute")
-                    || n.starts_with("v_mbcnt")
                     || matches!(n, "v_readlane_b32" | "v_writelane_b32")
                     || reads_first_lane
                     || reads_mask_as_data(x.st, i)
