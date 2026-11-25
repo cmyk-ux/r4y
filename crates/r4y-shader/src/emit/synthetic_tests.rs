@@ -217,7 +217,15 @@ fn gathers_at_a_level_match_the_hardware() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut ran = 0;
-    for (label, warp) in [("hardware", false), ("warp", true)] {
+    let devices = if std::env::var_os("R4Y_D3D12_WARP").is_some() {
+        // Hosted CI uses WARP explicitly; the VM's default virtual adapter
+        // is not a hardware-compatibility signal and can have different
+        // structured-buffer/gather behavior. Local runs still test both.
+        vec![("warp", true)]
+    } else {
+        vec![("hardware", false), ("warp", true)]
+    };
+    for (label, warp) in devices {
         let Ok(host) = Host::new(warp) else {
             eprintln!("no SM 6.6 {label} device; skipped");
             continue;
