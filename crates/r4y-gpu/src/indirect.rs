@@ -131,11 +131,11 @@ fn clamp() -> Option<&'static Clamp> {
         .as_ref()
 }
 
-fn make() -> windows::core::Result<Clamp> {
-    let device = &host().ok_or_else(windows::core::Error::empty)?.device;
+fn compile_clamp() -> windows::core::Result<ID3DBlob> {
     let mut code: Option<ID3DBlob> = None;
     let mut errors: Option<ID3DBlob> = None;
-    // SAFETY: the source and names live through the call; out pointers ours.
+    // SAFETY: the HLSL source and entry-point names live through the call;
+    // both output pointers refer to our local Options.
     let compiled = unsafe {
         D3DCompile(
             SOURCE.as_ptr().cast(),
@@ -151,20 +151,30 @@ fn make() -> windows::core::Result<Clamp> {
             Some(&mut errors),
         )
     };
-    if let Err(e) = compiled {
+    if let Err(error) = compiled {
         if let Some(errors) = errors {
-            // SAFETY: the blob's own bytes.
+            // SAFETY: the blob owns the diagnostic bytes being read.
             let text = unsafe {
-                std::slice::from_raw_parts(errors.GetBufferPointer().cast::<u8>(), errors.GetBufferSize())
+                std::slice::from_raw_parts(
+                    errors.GetBufferPointer().cast::<u8>(),
+                    errors.GetBufferSize(),
+                )
             };
             tracing::warn!("argument clamp: {}", String::from_utf8_lossy(text));
         }
-        return Err(e);
+        return Err(error);
     }
-    let code = code.ok_or_else(windows::core::Error::empty)?;
+    code.ok_or_else(windows::core::Error::empty)
+}
+
+fn make_for(device: &ID3D12Device) -> windows::core::Result<Clamp> {
+    let code = compile_clamp()?;
     // SAFETY: the blob's own bytes; the root signature is inside the shader.
     unsafe {
-        let bytes = std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize());
+        let bytes = std::slice::from_raw_parts(
+            code.GetBufferPointer().cast::<u8>(),
+            code.GetBufferSize(),
+        );
         let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes)?;
         let pso = device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
             pRootSignature: std::mem::transmute_copy(&root),
@@ -176,6 +186,11 @@ fn make() -> windows::core::Result<Clamp> {
         })?;
         Ok(Clamp { root, pso })
     }
+}
+
+fn make() -> windows::core::Result<Clamp> {
+    let device = &host().ok_or_else(windows::core::Error::empty)?.device;
+    make_for(device)
 }
 
 /// Minimum record byte stride for a supported PC indirect argument kind.
@@ -291,7 +306,13 @@ fn uav_barrier() -> D3D12_RESOURCE_BARRIER {
 
 #[cfg(test)]
 mod tests {
-    /// The clamp compiles with the system's compiler and the host takes it.
+    /// HLSL syntax and the embedded root signature compile without a GPU.
+    #[test]
+    fn argument_clamp_hlsl_compiles_without_a_gpu() {
+        assert!(super::compile_clamp().is_ok());
+    }
+
+    /// The host also accepts the compiled root signature and compute PSO.
     #[test]
     fn argument_clamp_builds_on_host() {
         let Some(host) = crate::host::host() else {
