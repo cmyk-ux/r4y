@@ -144,6 +144,37 @@ fn should_report_heap_overflow(previous: u32, index: u32) -> bool {
     index > previous && (previous == 0 || index >> 12 != previous >> 12)
 }
 
+
+/// Finds a contiguous run of free slots, preferring the cursor and then
+/// searching from the start. The second scan extends by at most `count - 1`
+/// slots so a run that straddles the search cursor is considered whole.
+/// It never joins the physical end of the heap to slot zero.
+fn find_dynamic_run(taken: &[bool], cursor: usize, count: usize) -> Option<usize> {
+    let end = taken.len();
+    if count == 0 || count > end || cursor >= end {
+        return None;
+    }
+
+    let second_end = cursor.saturating_add(count - 1).min(end);
+    let starts = (cursor..end).chain(0..second_end);
+    let mut run = 0usize;
+    let mut last = usize::MAX;
+
+    for at in starts {
+        // A discontinuity includes the physical end -> start transition.
+        if at != last.wrapping_add(1) {
+            run = 0;
+        }
+        last = at;
+        run = if taken[at] { 0 } else { run + 1 };
+        if run == count {
+            return Some(at + 1 - count);
+        }
+    }
+
+    None
+}
+
 impl HostHeap {
     pub(crate) fn new(sampler: bool, count: u32) -> Option<Self> {
         // Host creation discovers the physical view-heap limit and sets the
@@ -388,24 +419,7 @@ impl HostHeap {
         let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
         let (next, taken) = &mut *guard;
         let n = n as usize;
-        // Search from `next` on, then from the start.
-        let starts = (*next as usize..self.dynamic as usize).chain(0..*next as usize);
-        let mut run = 0;
-        let mut found = None;
-        let mut last = usize::MAX;
-        for at in starts {
-            // A run cannot wrap past the end.
-            if at != last.wrapping_add(1) {
-                run = 0;
-            }
-            last = at;
-            run = if taken[at] { 0 } else { run + 1 };
-            if run == n {
-                found = Some(at + 1 - n);
-                break;
-            }
-        }
-        let Some(first) = found else {
+        let Some(first) = find_dynamic_run(taken, *next as usize, n) else {
             static ONCE: std::sync::Once = std::sync::Once::new();
             ONCE.call_once(|| tracing::warn!(n, "no free dynamic descriptor slots: a table is not made"));
             return None;
@@ -1562,6 +1576,38 @@ mod tests {
         assert!(!should_report_heap_overflow(996_020, 999_423));
         assert!(should_report_heap_overflow(999_423, 999_424));
         assert!(!should_report_heap_overflow(999_424, 996_100));
+    }
+
+    /// The second scan must include enough slots after the cursor to find
+    /// a free run that starts before it and ends after it.
+    #[test]
+    fn dynamic_allocator_finds_a_run_crossing_the_search_cursor() {
+        let taken = [true, false, false, false, false, true, true, true];
+        assert_eq!(find_dynamic_run(&taken, 3, 4), Some(1));
+    }
+
+    /// Exhaustively compare the cursor-ordered scan with an independent
+    /// candidate-start reference for every heap up to ten slots. The
+    /// reference does not use the scan's run-tracking logic.
+    #[test]
+    fn dynamic_allocator_matches_reference_for_small_heap_states() {
+        for len in 1..=10usize {
+            for mask in 0usize..(1usize << len) {
+                let taken: Vec<bool> = (0..len).map(|i| mask & (1 << i) != 0).collect();
+                for cursor in 0..len {
+                    for count in 1..=len {
+                        let expected = (cursor..len)
+                            .chain(0..cursor)
+                            .find(|&first| first + count <= len && taken[first..first + count].iter().all(|&slot| !slot));
+                        assert_eq!(
+                            find_dynamic_run(&taken, cursor, count),
+                            expected,
+                            "len={len} mask={mask:#x} cursor={cursor} count={count}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The world's 16-byte view of 0 elements removed the device.
