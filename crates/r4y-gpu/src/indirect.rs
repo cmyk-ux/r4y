@@ -397,7 +397,7 @@ mod tests {
             Type: D3D12_HEAP_TYPE_READBACK,
             ..Default::default()
         };
-        let mut readback = None;
+        let mut readback: Option<ID3D12Resource> = None;
         // SAFETY: plain creation of a readback buffer on the host device.
         unsafe {
             host.device
