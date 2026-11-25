@@ -1684,8 +1684,21 @@ impl HostList {
         let (buffer, data) = self
             .budget
             .get_or_init(|| {
-                let (b, d) = host()?.shared_buffer(256)?;
-                Some((b, d as usize))
+                let (buffer, data) = host()?.shared_buffer(256)?;
+                // This mapped UAV buffer has one persistent explicit state.
+                // Unlike an implicitly promoted buffer, an explicitly
+                // transitioned resource does not decay to COMMON after
+                // ExecuteCommandLists. Record COMMON -> UAV only on creation.
+                // SAFETY: the list is open and the newly created buffer is
+                // live in COMMON state.
+                unsafe {
+                    self.list.ResourceBarrier(&[transition(
+                        &buffer,
+                        D3D12_RESOURCE_STATE_COMMON,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    )]);
+                }
+                Some((buffer, data as usize))
             })
             .as_ref()?;
         let mut deferred = self.deferred();
@@ -1696,17 +1709,6 @@ impl HostList {
             deferred
                 .copies
                 .push(Step::Host(Box::new(move || unsafe { (at as *mut u32).write_volatile(0) })));
-            // Buffers cannot be implicitly promoted from COMMON to UAV.
-            // They decay to COMMON after each ExecuteCommandLists, so record
-            // this explicit transition once per list recording.
-            // SAFETY: the list is open and the budget buffer is live.
-            unsafe {
-                self.list.ResourceBarrier(&[transition(
-                    buffer,
-                    D3D12_RESOURCE_STATE_COMMON,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                )]);
-            }
         }
         // SAFETY: a live buffer.
         Some(unsafe { buffer.GetGPUVirtualAddress() })
