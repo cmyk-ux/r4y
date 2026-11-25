@@ -79,6 +79,8 @@ pub(crate) struct Host {
     cpu_views: ID3D12DescriptorHeap,
     cpu_view_size: u32,
     next_cpu_view: AtomicU32,
+    /// A valid shader-visible sampler heap for root signatures that directly index it.
+    pub(crate) default_samplers: ID3D12DescriptorHeap,
     /// With `R4Y_D3D12_DEBUG` set (diagnostics builds): the debug
     /// layer's messages.
     messages: Option<ID3D12InfoQueue>,
@@ -246,6 +248,37 @@ fn create() -> windows::core::Result<Host> {
             })?;
         let cpu_view_size =
             device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        // A root signature carrying SAMPLER_HEAP_DIRECTLY_INDEXED requires
+        // a shader-visible sampler heap even when the title has not bound one.
+        let sampler_seed: ID3D12DescriptorHeap =
+            device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                Type: D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+                NumDescriptors: 1,
+                ..Default::default()
+            })?;
+        let default_samplers: ID3D12DescriptorHeap =
+            device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                Type: D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+                NumDescriptors: r4y_shader::emit::HEAP_SAMPLERS,
+                Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                ..Default::default()
+            })?;
+        let default_sampler = D3D12_SAMPLER_DESC {
+            Filter: D3D12_FILTER_MIN_MAG_MIP_POINT,
+            AddressU: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            AddressV: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            AddressW: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            MaxAnisotropy: 1,
+            ComparisonFunc: D3D12_COMPARISON_FUNC_NEVER,
+            ..Default::default()
+        };
+        device.CreateSampler(&default_sampler, sampler_seed.GetCPUDescriptorHandleForHeapStart());
+        device.CopyDescriptorsSimple(
+            r4y_shader::emit::HEAP_SAMPLERS,
+            default_samplers.GetCPUDescriptorHandleForHeapStart(),
+            sampler_seed.GetCPUDescriptorHandleForHeapStart(),
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+        );
         tracing::info!("host D3D12 device ready");
         // The console fuses its multiply-adds (`v_fma_f32`, `v_fmac_f32`,
         // `v_fma_mix*`); the lowering's DXIL `FMad` is fused only where the
@@ -275,6 +308,7 @@ fn create() -> windows::core::Result<Host> {
             cpu_views,
             cpu_view_size,
             next_cpu_view: AtomicU32::new(0),
+            default_samplers,
             messages,
             next_rtv: AtomicU32::new(0),
             presenter: Mutex::new(None),
