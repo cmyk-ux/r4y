@@ -385,3 +385,48 @@ At session start:
 6. Update both files when reference findings, code, test evidence or next steps change.
 
 Do not put game assets, proprietary title data, shader dumps, keys, credentials, or machine-specific sensitive information in Git. The log hashes above are diagnostic shader identifiers supplied for this investigation; do not add shader binaries, disassembly, or title-derived material.
+## 7. Follow-up: test/Clippy compile failure and repair (2026-11-25)
+
+The user ran the validation commands before the RTX 3070 A/B and reported:
+
+- `cargo build --release --locked -p r4y`: **passed** (17.04 s).
+- `cargo test -p r4y-gpu --locked`: **passed**, 93 passed, 0 failed, 1 ignored benchmark.
+- `cargo test -p r4y-shader --locked`: did not compile the test target. In `emit::host_wave_target_tests`, the test referenced private parent module `lower` as an unqualified name (`lower::CONSOLE_FLOW`); child test modules must use the parent path (`super::lower::CONSOLE_FLOW`) or import it.
+- `cargo test --workspace --locked`: failed on the same `E0433`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exposed the same unresolved module and `clippy::too_many_arguments` on the private `emit_for_with_console_flow` helper (8 parameters).
+- Because the test target failed, the successful release build must not be treated as proof that the Wave64 diagnostic tests compile.
+
+The root cause of the unresolved module was an earlier cleanup commit `b194221a932443984d05b24752aba195bb7b7570` that removed the `emit_for` import but left the module-path reference in the nested test module.
+
+### Repair published
+
+- `f8855c4190006040f36651d618af3a5ca5833675` — introduced a private `EmitOptions { target, allow_console_flow }` value, reducing `emit_for_with_console_flow` from 8 parameters to 7 without suppressing Clippy.
+- `f02181adf76067bb7262eadd18543f5a98289254` — qualified the test's module reference as `super::lower::CONSOLE_FLOW` and formatted the long match arm.
+- Current remote feature-branch head after the repair: `f02181adf76067bb7262eadd18543f5a98289254`.
+- PR #16 remains open. At the time this note was written, the latest visible green branch CI was still on the older code head `a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa`; the repair commits themselves have not yet been confirmed green.
+- The GitHub compare still reports the feature branch as divergent from current `main` (102 ahead / 27 behind at the prior snapshot). Do not merge just to make CI run; keep validation on the PR branch and inspect any CI result tied to the exact head.
+
+### Next validation steps (must precede the game A/B)
+
+```powershell
+git fetch origin
+git switch feature/wave64-host-target
+git pull --ff-only origin feature/wave64-host-target
+git status --short --branch
+git rev-parse HEAD
+```
+
+Expected HEAD: `f02181adf76067bb7262eadd18543f5a98289254`. If local HEAD differs, stop and inspect branch/status before testing.
+
+Then rerun:
+
+```powershell
+cargo fmt --all -- --check
+cargo test -p r4y-shader --locked
+cargo test -p r4y-gpu --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --release --locked -p r4y
+```
+
+Also verify the CI run for the exact PR head, not merely the prior green run. Only after these pass should the RTX 3070 `R4Y_WAVE64_CONSOLE_FLOW` A/B be attempted.
