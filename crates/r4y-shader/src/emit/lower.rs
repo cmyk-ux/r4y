@@ -74,6 +74,8 @@ pub(crate) struct Parts<'a> {
     pub mesh_stride: u32,
     /// Wave sizes supported by the host GPU.
     pub target: super::Target,
+    /// Use console-wave execution semantics for one Wave64 group split in two.
+    pub console_cf: bool,
 }
 
 enum Stop {
@@ -103,6 +105,18 @@ pub(crate) fn lower(parts: &Parts) -> Result<Lowered, ShaderError> {
 const TWO_PI: f32 = std::f32::consts::TAU;
 /// `s_sendmsg` id of a mesh or NGG stage's output allocation request.
 const GS_ALLOC_REQ: u16 = 9;
+
+/// A wave64 program whose two 32-lane host waves must exchange data through
+/// group-shared memory. The translator retries it using console-wave control
+/// flow, but only for a single console wave (at most 64 threads), no native
+/// LDS allocation, no permute and no whole-wave reduction sections.
+pub(crate) const CONSOLE_FLOW: &str =
+    "a wave64 program whose halves exchange lanes (console flow)";
+
+/// A descriptor selected independently by each lane's branch cannot be
+/// represented by the uniform edge taken by the console flow.
+const LANE_PHI_IN_CONSOLE_FLOW: &str =
+    "a per-lane descriptor chosen by control flow in the console flow";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Numeric {
@@ -220,6 +234,12 @@ struct Lower<'a> {
     split: bool,
     /// The console thread's flat group id, reconstructed from host wave and lane.
     console_flat: Option<V>,
+    /// Run the Wave64 group using console control-flow semantics.
+    console_cf: bool,
+    /// The first lowering found cross-half operations and requested console flow.
+    wants_console_flow: bool,
+    /// Two group-shared dwords used to exchange each half's value.
+    xchg: Option<V>,
     /// Pixel: an ordered section (POPS), whose UAVs the host makes
     /// rasterizer-ordered views.
     pops: bool,
@@ -621,6 +641,7 @@ impl<'a> Lower<'a> {
             || insts().any(|i| i.name().starts_with("image_bvh"));
         let mut console_lanes = false;
         let mut split = false;
+        let mut wants_console_flow = false;
         if let StageIo::Cs(cs) = x.native.io {
             s.threads = Some(cs.threads);
             s.lds_dwords = cs.lds_bytes() / 4;
@@ -686,6 +707,22 @@ impl<'a> Lower<'a> {
                 && !x.target.runs(64)
                 && x.target.runs(32)
                 && (0..p.blocks.len()).all(|b| super::wave::sections(p, b).is_empty());
+            // Cross-half operations can be emulated by running all
+            // lanes of a single console wave through the same control flow
+            // and exchanging one dword per host half through group-shared.
+            wants_console_flow = console_lanes
+                && !split
+                && x.native.wave64
+                && !x.target.runs(64)
+                && x.target.runs(32)
+                && s.lds_dwords == 0
+                && cs.threads.iter().product::<u32>() <= 64
+                && !insts().any(|i| i.name().contains("permute"))
+                && (0..p.blocks.len()).all(|b| super::wave::sections(p, b).is_empty());
+            if x.console_cf {
+                console_lanes = true;
+                split = true;
+            }
             if split {
                 s.wave_size = Some(32);
             } else if console_lanes || one_wave && s.lds_dwords > 0 {
@@ -784,6 +821,9 @@ impl<'a> Lower<'a> {
             console_lanes,
             split,
             console_flat: None,
+            console_cf: x.console_cf,
+            wants_console_flow,
+            xchg: None,
             pops: matches!(x.native.io, StageIo::Ps { db_shader_control, .. }
                 if db_shader_control & 1 << 16 != 0),
             root_memory,
@@ -1385,6 +1425,9 @@ impl<'a> Lower<'a> {
     }
 
     fn run(mut self) -> Result<Lowered, Stop> {
+        if self.wants_console_flow && !self.x.console_cf {
+            return Err(unsupported(0, CONSOLE_FLOW));
+        }
         if let Some(wave) = self.s.wave_size
             && !self.x.target.runs(wave)
         {
