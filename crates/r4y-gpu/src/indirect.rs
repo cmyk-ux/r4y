@@ -209,7 +209,15 @@ fn validate_layout(
     args_gpu: u64,
     count_gpu: Option<u64>,
 ) -> Option<u64> {
-    if stride < min_stride(kind)? || !stride.is_multiple_of(4) || !args_gpu.is_multiple_of(4) {
+    // D3D12 limits each Dispatch dimension to 65,535 groups. The shader
+    // indexes records linearly through SV_DispatchThreadID.x, so refuse a
+    // request that would overflow that one-dimensional dispatch.
+    const MAX_RECORDS: u32 = 65_535 * 64;
+    if records > MAX_RECORDS
+        || stride < min_stride(kind)?
+        || !stride.is_multiple_of(4)
+        || !args_gpu.is_multiple_of(4)
+    {
         return None;
     }
     if count_gpu.is_some_and(|address| !address.is_multiple_of(4)) {
@@ -357,6 +365,14 @@ mod tests {
     fn indirect_layout_checks_scratch_size() {
         assert_eq!(super::validate_layout((0, 16, 4), 0x1000, None), Some(64));
         assert_eq!(super::validate_layout((2, 12, 0), 0x1000, None), Some(0));
+        assert_eq!(
+            super::validate_layout((0, 16, 65_535 * 64), 0x1000, None),
+            Some(u64::from(16 * 65_535 * 64)),
+        );
+        assert_eq!(
+            super::validate_layout((0, 16, 65_535 * 64 + 1), 0x1000, None),
+            None,
+        );
     }
 
     #[test]
