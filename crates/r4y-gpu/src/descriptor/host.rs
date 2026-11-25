@@ -639,6 +639,23 @@ impl HostHeap {
             } else {
                 make(&view, self.cpu(index))
             };
+            // The game's first pixel draw reported a Texture2D-vs-Texture1D
+            // mismatch at shader-visible descriptor slot zero. Log the exact
+            // title record and the host heap object for that slot so the next
+            // GBV report can distinguish a bad source descriptor from a bad
+            // heap binding or a null fallback.
+            #[cfg(feature = "diagnostics")]
+            if index == 0 {
+                use windows::core::Interface;
+                tracing::info!(
+                    title_heap = ?self.heap.as_raw(),
+                    host_gpu_heap = format_args!("{:#x}", self.gpu(0).ptr),
+                    for_draw,
+                    made = kept.is_some(),
+                    ?view,
+                    "mirrored descriptor heap slot zero"
+                );
+            }
             if kept.is_none() && !self.sampler {
                 null_for(&view, self.cpu(index));
             }
