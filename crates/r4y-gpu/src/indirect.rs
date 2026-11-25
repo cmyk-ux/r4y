@@ -327,7 +327,11 @@ mod tests {
         assert!(super::SOURCE.contains("if (id.x >= active) return"));
         assert!(super::SOURCE.contains("ByteAddressBuffer args : register(t0)"));
         assert!(super::SOURCE.contains("RWByteAddressBuffer dst_args : register(u0)"));
-        assert!(!super::SOURCE.contains("args.Store"));
+        assert!(
+            !super::SOURCE
+                .lines()
+                .any(|line| line.trim_start().starts_with("args.Store"))
+        );
         assert!(super::SOURCE.contains("dst_args.Store"));
     }
 
