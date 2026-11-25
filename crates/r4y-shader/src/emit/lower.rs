@@ -9816,8 +9816,9 @@ mod tests {
 
         // A back edge can be cut when the per-lane shader iteration limit is reached.
         let looped = [
-            0xBF8A_0000u32, // s_barrier
-            0xBF82_FFFE,    // s_branch -> s_barrier
+            0xBE80_0380u32, // s_mov_b32 s0, 0 (keep the loop out of the entry block)
+            0xBF8A_0000,    // loop: s_barrier
+            0xBF82_FFFE,    // s_branch -> loop
             S_ENDPGM,       // unreachable, but keeps a terminal block in the program
         ];
         let (barriers, fence_only) = barrier_analysis(&looped);
