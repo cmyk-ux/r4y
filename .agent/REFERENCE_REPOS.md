@@ -139,3 +139,18 @@ The disabled run may lose rendering/features because affected shaders are intent
 ## Session-start rule
 
 At the start of future R4Y work, read both `.agent/SESSION_HANDOFF.md` and this file. Check the branch/head and CI, then review relevant upstream commits, issues and PRs using the priority order at the top. Do not ask the user to repeat the watchlist or to restate conclusions already recorded here. Update the audit date and findings whenever a reference changes the diagnosis, implementation or test plan.
+
+
+## Supplemental reference — Belobug/VIctory-Belobug-AMD (2026-11-25)
+
+This does **not** change the owner's standing priority order above. It is an additional reference because it contains recent AMD-specific shader semantics, indirect-execution redesign and diagnostics that overlap R4Y.
+
+- Fork: https://github.com/Belobug/VIctory-Belobug-AMD
+- Audited head: `4cbe9d76cf3c1fdca7f9a8d8364eacc33e7aa597`
+- Its README reports world rendering on one RX 9070 XT at 3–5 FPS, but not playable; moving vehicles are broken, RT indirect lighting is replaced with a constant, and some compute programs are dropped. It has no reported NVIDIA/Intel test.
+- The highest-value R4Y candidate is the change to indirect clamping: separate read-only source arguments from a scratch output, respect `min(max,count)`, use bounded/saturating budget accounting, and (after correctness is proven) hoist clamps for a run of draws with producer-write tracking. R4Y currently modifies the title argument shadow in-place and does not pass the optional count into its clamp helper. See .agent/VICTORY_AMD_FORK_AUDIT.md before changing this subsystem.
+- The other focused candidate is helper-lane semantics in pixel shaders: all quad-local reads may need quad reads, while `v_readfirstlane_b32` may need to return a helper lane's own value in a waterfall. R4Y's current quad predicate is narrower (requires a discard); its readfirstlane lowering lacks the fork's helper special-case. AMD-originated behavior must be proven with DXIL/WARP and RTX 3070 fixtures before changing R4Y.
+- Do not port the fork wholesale or copy its visual workarounds (constant ambient light, static no-wind tree shaders) as general fixes. Its timing claims are self-reported for one AMD workload.
+- PortWatch methodology page: https://portwatch-vi.xyz/#method. Tracker snapshot last refreshed `2026-11-25T10:22:39.836Z` did not contain the repository name or owner; do not claim the fork is scored/listed there.
+
+Detailed code comparison, upstream commit links, test plan and evidence limits: .agent/VICTORY_AMD_FORK_AUDIT.md.
