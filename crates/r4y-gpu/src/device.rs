@@ -312,11 +312,46 @@ extern "system" fn check_feature_support(
         FORMAT_SUPPORT => {
             // SAFETY: checked size and non-null.
             let q = unsafe { &mut *data.cast::<[u32; 3]>() };
-            // shortcut: every use of every format; answer from the host
-            // device once there is one.
-            q[1] = 0x7fff_ffff;
-            q[2] = 0xffff;
-            S_OK
+            #[cfg(windows)]
+            {
+                use windows::Win32::Graphics::Direct3D12::{
+                    D3D12_FEATURE_DATA_FORMAT_SUPPORT, D3D12_FEATURE_FORMAT_SUPPORT,
+                };
+                use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
+
+                let Some(host) = crate::host::host() else {
+                    q[1..].fill(0);
+                    return UNSUPPORTED;
+                };
+                // Console-only depth formats have PC equivalents in the
+                // resource layer; query the same format the host resources use.
+                let format = resource::pc_format(q[0]);
+                let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+                    Format: DXGI_FORMAT(format as i32),
+                    ..Default::default()
+                };
+                // SAFETY: the host query receives its exact native structure.
+                if let Err(error) = unsafe {
+                    host.device.CheckFeatureSupport(
+                        D3D12_FEATURE_FORMAT_SUPPORT,
+                        (&mut support as *mut D3D12_FEATURE_DATA_FORMAT_SUPPORT).cast(),
+                        size_of_val(&support) as u32,
+                    )
+                } {
+                    q[1..].fill(0);
+                    tracing::debug!(format, error = %error, "host format support query failed");
+                    return UNSUPPORTED;
+                }
+                q[0] = format;
+                q[1] = support.Support1.0;
+                q[2] = support.Support2.0;
+                S_OK
+            }
+            #[cfg(not(windows))]
+            {
+                q[1..].fill(0);
+                UNSUPPORTED
+            }
         }
         MULTISAMPLE => {
             // SAFETY: checked size and non-null.
@@ -578,6 +613,51 @@ mod tests {
         assert_eq!(
             check(device, 8, waves.as_mut_ptr().cast(), 16),
             E_INVALIDARG
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn format_support_queries_match_the_host_device() {
+        use windows::Win32::Graphics::Direct3D12::{
+            D3D12_FEATURE_DATA_FORMAT_SUPPORT, D3D12_FEATURE_FORMAT_SUPPORT,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_R8G8B8A8_UNORM};
+
+        let Some(host) = crate::host::host() else {
+            return; // no host GPU here
+        };
+        let mut expected = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            ..Default::default()
+        };
+        // SAFETY: a plain host feature query into the native structure.
+        assert!(unsafe {
+            host.device.CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT,
+                (&mut expected as *mut D3D12_FEATURE_DATA_FORMAT_SUPPORT).cast(),
+                size_of_val(&expected) as u32,
+            )
+        }
+        .is_ok());
+
+        let mut reported = [DXGI_FORMAT_R8G8B8A8_UNORM.0 as u32, 0, 0];
+        assert_eq!(
+            check_feature_support(
+                device(),
+                3,
+                reported.as_mut_ptr().cast(),
+                size_of_val(&reported) as u32,
+            ),
+            S_OK
+        );
+        assert_eq!(
+            reported,
+            [
+                DXGI_FORMAT_R8G8B8A8_UNORM.0 as u32,
+                expected.Support1.0,
+                expected.Support2.0,
+            ]
         );
     }
 }
