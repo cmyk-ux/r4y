@@ -27,19 +27,28 @@ use crate::host::{BUFFER_INDIRECT, BUFFER_UAV, HostList, host, transition};
 use crate::shadow::Shadow;
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=4, b0), UAV(u0), UAV(u1)"
-cbuffer Record : register(b0) { uint kind; uint stride; uint records; uint unused; };
+#define RS "RootConstants(num32BitConstants=4, b0), UAV(u0), UAV(u1), UAV(u2)"
+cbuffer Record : register(b0) { uint kind; uint stride; uint records; uint has_count; };
 RWByteAddressBuffer args : register(u0);
+// Optional ExecuteIndirect count buffer. It is bound as a UAV so it can
+// share a resource/state with the argument buffer if both live in one
+// title shadow allocation; this shader only reads it.
+RWByteAddressBuffer count_buf : register(u1);
 // The list's work so far (vertex instances, threads): past the budget,
 // records run empty.
-RWByteAddressBuffer budget : register(u1);
+RWByteAddressBuffer budget : register(u2);
 static const uint BUDGET = 1u << 27;
 // Groups of one dispatch; more run empty.
 static const uint GROUPS = 1u << 20;
 [RootSignature(RS)]
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= records) return;
+    // ExecuteIndirect will also honor this count, but the clamp must honor
+    // it too: records beyond the count are not active input and must not be
+    // read or modified.
+    uint active = records;
+    if (has_count != 0) active = min(active, count_buf.Load(0));
+    if (id.x >= active) return;
     uint at = id.x * stride;
     uint cost;
     if (kind <= 1) {
@@ -142,15 +151,18 @@ fn make() -> windows::core::Result<Clamp> {
     }
 }
 
-/// Records, in `list`, the clamp of `records` records of `kind` (PC
-/// argument numbering) `stride` bytes apart at host address `gpu` in
-/// `buffer`, and leaves the buffer ready to be read as arguments. Replaces
-/// the list's compute root signature and pipeline (callers bind theirs
-/// after). False if the clamp is not available.
+/// Records, in `list`, the clamp of at most `records` records of `kind`
+/// (PC argument numbering) `stride` bytes apart at host address `gpu` in
+/// `buffer`, also bounded by the optional count buffer at `count`. The
+/// count is consumed by the helper shader as well as by ExecuteIndirect, so
+/// inactive tail records are never read or changed. Replaces the list's
+/// compute root signature and pipeline (callers bind theirs after). False
+/// if the clamp is not available.
 pub(crate) fn bound(
     list: &HostList,
     shadow: &Arc<Shadow>,
     gpu: u64,
+    count: Option<(&Arc<Shadow>, u64)>,
     (kind, stride, records): (u32, u32, u32),
 ) -> bool {
     let (Some(c), Some(budget)) = (clamp(), list.budget()) else {
@@ -160,18 +172,28 @@ pub(crate) fn bound(
         return false;
     }
     let l = &list.list;
-    let constants = [kind, stride, records, 0];
+    let count_gpu = match count {
+        Some((counter, address)) => {
+            list.buffer_state(counter, BUFFER_UAV);
+            counter.gpu(address)
+        }
+        None => gpu,
+    };
+    let constants = [kind, stride, records, u32::from(count.is_some())];
     list.buffer_state(shadow, BUFFER_UAV);
-    // SAFETY: an open list; our root signature, pipeline and a live buffer
-    // the caller's list holds.
+    // SAFETY: an open list; our root signature, pipeline and live argument,
+    // optional count, and budget buffers. The argument/count buffers are in
+    // UAV state for this helper; the same shadow may legally back both UAV
+    // root descriptors.
     unsafe {
-        // Earlier shader writes (the title's argument passes) first.
+        // Earlier shader writes (the title's argument and count passes) first.
         l.ResourceBarrier(&[uav_barrier()]);
         l.SetComputeRootSignature(&c.root);
         l.SetPipelineState(&c.pso);
         l.SetComputeRoot32BitConstants(0, 4, constants.as_ptr().cast(), 0);
         l.SetComputeRootUnorderedAccessView(1, gpu);
-        l.SetComputeRootUnorderedAccessView(2, budget);
+        l.SetComputeRootUnorderedAccessView(2, count_gpu);
+        l.SetComputeRootUnorderedAccessView(3, budget);
         l.Dispatch(records.div_ceil(64), 1, 1);
         l.ResourceBarrier(&[
             uav_barrier(),
@@ -211,5 +233,18 @@ mod tests {
             return; // no host GPU here
         }
         assert!(super::clamp().is_some());
+    }
+
+    #[test]
+    fn clamp_limits_its_work_to_execute_indirect_count() {
+        assert!(super::SOURCE.contains("if (has_count != 0)"));
+        assert!(super::SOURCE.contains("active = min(active, count_buf.Load(0))"));
+        assert!(super::SOURCE.contains("if (id.x >= active) return"));
+    }
+
+    #[test]
+    fn clamp_without_count_keeps_the_maximum_record_count() {
+        // The no-count path leaves `active` equal to `records`.
+        assert!(super::SOURCE.contains("uint active = records"));
     }
 }
