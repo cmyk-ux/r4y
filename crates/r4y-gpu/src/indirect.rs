@@ -540,7 +540,9 @@ mod tests {
             &dst,
             budget_gpu,
             source_gpu,
+            0,
             Some(count_gpu),
+            0,
             (0, 16, 3),
         ));
         list.indirect_ready();
