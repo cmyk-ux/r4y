@@ -224,6 +224,8 @@ struct Lower<'a> {
     flat: Option<V>,
     /// Mesh: IR blocks whose `s_barrier` is left out.
     no_barrier: HashSet<usize>,
+    /// Blocks whose group wait may not be reached by every host thread.
+    fence_only: HashSet<usize>,
     /// Vertex and mesh outputs holding 16-bit values: row, whether two per
     /// dword ([`packed_half`]).
     half_outputs: HashMap<u8, bool>,
@@ -462,6 +464,134 @@ fn smem_dwords(name: &str) -> Option<u32> {
     }
 }
 
+/// Whether every lane runs each IR block. A block in a lane-branch region
+/// is not executed by all lanes; an indirect exit makes the analysis
+/// inconclusive, which callers must handle conservatively.
+fn all_lane_blocks(st: &Structured) -> Option<Vec<bool>> {
+    let n = st.exits.len();
+    let mut all = vec![true; n];
+    for (_, region) in lane_regions(st)? {
+        for b in (0..n).filter(|&b| region[b]) {
+            all[b] = false;
+        }
+    }
+    Some(all)
+}
+
+/// Per-lane branches and the blocks reachable from them that do not
+/// post-dominate the branch. Scalar-uniform branches take the same path
+/// for every lane and therefore do not create a divergent region.
+fn lane_regions(st: &Structured) -> Option<Vec<(usize, Vec<bool>)>> {
+    let n = st.exits.len();
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (b, e) in st.exits.iter().enumerate() {
+        match *e {
+            LaneExit::Jump(t) => succ[b].push(t),
+            LaneExit::Branch { taken, not_taken, .. } => {
+                succ[b].push(taken);
+                succ[b].push(not_taken);
+            }
+            LaneExit::End => {}
+            LaneExit::Indirect => return None,
+        }
+    }
+
+    // Post-dominators (bitsets); all End blocks lead to a virtual exit.
+    let words = n.div_ceil(64);
+    let full = vec![u64::MAX; words];
+    let mut pdom: Vec<Vec<u64>> = (0..n)
+        .map(|b| {
+            if succ[b].is_empty() {
+                let mut v = vec![0; words];
+                v[b / 64] |= 1 << (b % 64);
+                v
+            } else {
+                full.clone()
+            }
+        })
+        .collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in (0..n).rev() {
+            if succ[b].is_empty() {
+                continue;
+            }
+            let mut v = full.clone();
+            for &t in &succ[b] {
+                for w in 0..words {
+                    v[w] &= pdom[t][w];
+                }
+            }
+            v[b / 64] |= 1 << (b % 64);
+            if v != pdom[b] {
+                pdom[b] = v;
+                changed = true;
+            }
+        }
+    }
+
+    let mut regions = Vec::new();
+    for (d, e) in st.exits.iter().enumerate() {
+        let LaneExit::Branch { when, .. } = *e else {
+            continue;
+        };
+        if st.bools.support(when).iter().all(|a| matches!(a, Atom::Uniform(_))) {
+            continue;
+        }
+        // Reachable blocks that do not post-dominate this lane branch.
+        let mut seen = vec![false; n];
+        let mut stack = succ[d].clone();
+        while let Some(b) = stack.pop() {
+            if seen[b] || pdom[d][b / 64] >> (b % 64) & 1 == 1 {
+                continue;
+            }
+            seen[b] = true;
+            stack.extend(succ[b].iter().copied());
+        }
+        regions.push((d, seen));
+    }
+    Some(regions)
+}
+
+/// The title's barriers a host thread may never reach: in a lane-divergent
+/// block, or in a program with a loop that the translator may cut short at
+/// the iteration limit. In those cases a group wait can strand the other
+/// threads until the driver resets the device. The memory fence is retained.
+fn fence_only_blocks(p: &Program, st: &Structured) -> HashSet<usize> {
+    if !p.blocks.iter().any(|block| block.insts.iter().any(|i| i.name() == "s_barrier")) {
+        return HashSet::new();
+    }
+
+    let order = crate::ir::reverse_postorder(&p.blocks);
+    let mut place = vec![usize::MAX; p.blocks.len()];
+    for (n, &b) in order.iter().enumerate() {
+        place[b] = n;
+    }
+    let back = |from: usize, to: usize| {
+        let at = |b: usize| place.get(b).copied().unwrap_or(usize::MAX);
+        at(from) != usize::MAX && at(to) <= at(from)
+    };
+    // A loop stopped by LOOP_LIMIT can leave some lanes before a barrier
+    // that later iterations of other lanes still reach.
+    let cut_short = st
+        .exits
+        .iter()
+        .enumerate()
+        .any(|(b, e)| matches!(*e, LaneExit::Jump(t) if back(b, t)));
+    let all = all_lane_blocks(st);
+
+    (0..p.blocks.len())
+        .filter(|&b| p.blocks[b].insts.iter().any(|i| i.name() == "s_barrier"))
+        .filter(|&b| {
+            cut_short
+                || all
+                    .as_ref()
+                    .is_none_or(|all| !all.get(b).copied().unwrap_or(false))
+        })
+        .collect()
+}
+
 impl<'a> Lower<'a> {
     fn new(x: &'a Parts<'a>, bad: &'a HashMap<Value, Why>) -> Self {
         let p = x.p;
@@ -526,6 +656,11 @@ impl<'a> Lower<'a> {
                 s.wave_size = Some(wave);
             }
         }
+        let fence_only = if super::group_sync() == 1 {
+            fence_only_blocks(p, x.st)
+        } else {
+            HashSet::new()
+        };
         let mut no_barrier = HashSet::new();
         if let StageIo::Ms(ms) = &x.native.io {
             s.prims = x.prims.clone();
@@ -616,6 +751,7 @@ impl<'a> Lower<'a> {
             root_memory,
             flat: None,
             no_barrier,
+            fence_only,
             half_outputs: half_outputs(&x.native.io),
             mask_data: match x.native.stage {
                 HwStage::Cs => MaskData::Console,
@@ -3236,7 +3372,16 @@ impl<'a> Lower<'a> {
                 // Thread-group sync with a shared-memory fence, and a UAV
                 // fence when the program writes UAVs (the waits before an
                 // s_barrier make those writes visible on the console).
-                let mode = if self.writes_uavs { 1 | 2 | 8 } else { 1 | 8 };
+                let mut mode = if self.writes_uavs { 1 | 2 | 8 } else { 1 | 8 };
+                let waits = match super::group_sync() {
+                    0 => false,
+                    1 => !self.fence_only.contains(&b),
+                    _ => true,
+                };
+                if !waits {
+                    // Keep the memory/UAV fence; only remove the whole-group wait.
+                    mode &= !1;
+                }
                 let mode = self.s.m.i32(mode);
                 let void = self.s.t.void;
                 self.s
@@ -9628,6 +9773,56 @@ mod tests {
             prims: vec![],
             mesh_stride: 0,
         })
+    }
+
+    /// Returns the title barrier blocks and those whose group wait must be
+    /// removed in the experimental safe mode.
+    fn barrier_analysis(words: &[u32]) -> (Vec<usize>, std::collections::HashSet<usize>) {
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let p = ir::build(&code, false, 256).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let barriers = p
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(b, block)| block.insts.iter().any(|i| i.name() == "s_barrier").then_some(b))
+            .collect();
+        (barriers, super::fence_only_blocks(&p, &st))
+    }
+
+    #[test]
+    fn barrier_waits_are_removed_only_for_lane_divergence_or_cut_short_loops() {
+        // Scalar SGPR condition: every lane takes the same branch; keep the group wait.
+        let uniform = [
+            0xBF06_0100u32, // s_cmp_eq_u32 s0, s1
+            0xBF85_0001,    // s_cbranch_scc1 -> end
+            0xBF8A_0000,    // s_barrier
+            S_ENDPGM,
+        ];
+        let (barriers, fence_only) = barrier_analysis(&uniform);
+        assert_eq!(barriers.len(), 1);
+        assert!(!fence_only.contains(&barriers[0]));
+
+        // EXEC is lane-dependent: some lanes skip the barrier, so a group wait is unsafe.
+        let divergent = [
+            0x7C22_0080u32, // v_cmpx_lt_f32 exec, 0, v0
+            0xBF88_0001,     // s_cbranch_execz -> end
+            0xBF8A_0000,     // s_barrier
+            S_ENDPGM,
+        ];
+        let (barriers, fence_only) = barrier_analysis(&divergent);
+        assert_eq!(barriers.len(), 1);
+        assert!(fence_only.contains(&barriers[0]));
+
+        // A back edge can be cut when the per-lane shader iteration limit is reached.
+        let looped = [
+            0xBF8A_0000u32, // s_barrier
+            0xBF82_FFFE,    // s_branch -> s_barrier
+            S_ENDPGM,       // unreachable, but keeps a terminal block in the program
+        ];
+        let (barriers, fence_only) = barrier_analysis(&looped);
+        assert_eq!(barriers.len(), 1);
+        assert!(fence_only.contains(&barriers[0]));
     }
 
     /// Root parameter `slot` in user SGPRs from `user_data` on.

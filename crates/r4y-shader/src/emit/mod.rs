@@ -230,6 +230,36 @@ pub fn loop_limit() -> u32 {
     })
 }
 
+/// Controls whether translated `s_barrier` instructions wait for the whole
+/// host thread group. This setting is part of the shader-cache key.
+///
+/// `R4Y_GROUP_SYNC`:
+/// - unset or `2`: preserve the existing group wait at every barrier.
+/// - `1`: keep the memory fence, but remove the group wait where control-flow
+///   analysis says that not every lane can reach the barrier, or a loop may be
+///   cut short by the shader iteration limit. This is an experimental
+///   compatibility workaround; it can change results for code relying on
+///   cross-wave synchronization.
+/// - `0`: remove the group wait at every barrier. Diagnostic only; results
+///   may be incorrect.
+///
+/// Defaulting to `2` preserves the previous translation unless explicitly
+/// overridden for a diagnostic run.
+pub fn group_sync() -> u8 {
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| parse_group_sync(std::env::var("R4Y_GROUP_SYNC").ok().as_deref()))
+}
+
+/// `R4Y_GROUP_SYNC`'s value; invalid or missing values retain strict mode.
+/// Pure, for testing.
+fn parse_group_sync(value: Option<&str>) -> u8 {
+    match value.map(str::trim) {
+        Some("0") => 0,
+        Some("1") => 1,
+        _ => 2,
+    }
+}
+
 /// `R4Y_SHADER_LOOP_LIMIT`'s value; the default when it is unset,
 /// unreadable or 0. Pure, for testing.
 fn parse_loop_limit(value: Option<&str>) -> u32 {
@@ -567,7 +597,18 @@ fn signature(part: &[u8]) -> Result<Vec<container::SigElement>, ShaderError> {
 mod tests {
     use super::bitcode::Attr;
     use super::lower::LOOP_LIMIT;
-    use super::parse_loop_limit;
+    use super::{parse_group_sync, parse_loop_limit};
+
+    #[test]
+    fn the_group_sync_switch_parses_or_falls_back() {
+        assert_eq!(parse_group_sync(None), 2);
+        assert_eq!(parse_group_sync(Some("2")), 2);
+        assert_eq!(parse_group_sync(Some(" 1 ")), 1);
+        assert_eq!(parse_group_sync(Some("0")), 0);
+        for bad in ["", "-1", "3", "strict", "0x1"] {
+            assert_eq!(parse_group_sync(Some(bad)), 2, "{bad:?}");
+        }
+    }
 
     #[test]
     fn the_loop_limit_switch_parses_or_falls_back() {
