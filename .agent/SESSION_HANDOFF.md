@@ -207,23 +207,28 @@ git rev-parse --short HEAD
 cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
 ```
 Expected HEAD: `24d1f7e` or a newer descendant.
-Latest RTX 3070 diagnosis after the targeted IR dump (2026-11-25; user ran branch HEAD `c36a102`):
-- The test passed all assertions before the cross-half write fixture: in-half DPP/swizzle, row-mask behavior, ballot/count, corrected ordinary MBCNT, and cross-half `v_readlane`.
-- The decoded `v_writelane_b32` at offset `0x24` is structurally as intended: destination `v5`, scalar source `s9` (42), lane constant 40. This means the failure was not caused by malformed `v_writelane` operands.
-- The next instruction at offset `0x2c`, intended by the fixture comment to be `v_mov_b32 v2, v5`, actually decoded as `v_mov_b32 v2, s5`: IR reads show `(S(5), Value(11))`, not `(V(5), ...)`.
-- The resource trace identifies `s4:s7` as the output buffer descriptor loaded at `(block 0, offset 0x08)`. Therefore `s5` is a descriptor dword, not the lane-write result. The later buffer store at `0x38` surfaces the unsupported descriptor-as-number value; it is not the original bad instruction.
-- This is the same class of fixture encoding error as the earlier MBCNT copy: VOP1 source code `0x005` means SGPR `s5`, while VGPR `v5` requires source code `0x105`. The correct instruction is `0x7E04_0305`, not `0x7E04_0205`.
-- Commit `8d2fe8b` fixes the fixture to `0x7E04_0305` and removes the temporary one-off diagnostic prints. No production lowering change was made from this diagnosis.
-- Important: the cross-half write kernel has still **not** been dispatched on the RTX 3070. The failure was during translation of the malformed result-copy fixture, so real `v_writelane` behavior remains to be validated after this correction.
-- CI #143 (main) and #144 (PR branch HEAD `c36a102`) passed. CI #144 completed Clippy, build and all tests (212 passed, 0 failed, 2 ignored); its D3D12 hardware step explicitly skipped because the hosted runner supports neither 32- nor 64-lane waves. This is not a substitute for the user's RTX dispatch.
+Latest RTX 3070 hardware validation (2026-11-25; user ran the full test on branch commit `071dce4`):
+- Command: `cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output`
+- Result: `1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out`, finished in 0.66s.
+- The test explicitly reported `split wave64: true` for 64-, 128-, and 32-thread lane-order cases, confirming the RTX 3070 exercised the Wave64-to-Wave32 path.
+- Because the function completed successfully on a Wave32-only adapter, all later assertions inside its `if !target.runs(64)` block also passed (they are silent on success):
+  - DPP row-mask handling for 64/128 threads.
+  - VCC ballot/count for 64/48/32 threads.
+  - Ordinary `v_mbcnt_lo` lane indexing.
+  - Cross-half `v_readlane_b32` and `v_writelane_b32`.
+  - Console-flow branch with one half inactive.
+  - Cross-half `v_readfirstlane_b32`.
+  - SAVEEXEC/SCC behavior.
+  - Cross-half readlane inside a divergent loop with per-lane iteration counts.
+- This is the first real RTX 3070 dispatch validation of the cross-half write path; the previous failure was a test-only VOP1 source encoding error fixed by commit `8d2fe8b` (`0x7E04_0305` reads VGPR `v5`, while `0x7E04_0205` read SGPR `s5`).
+- CI #147 on PR head `071dce4` passed Clippy, diagnostics build, release build and workspace tests (212 passed, 0 failed, 2 ignored). As expected, its hosted D3D12 step explicitly skipped because that runner exposes neither 32- nor 64-lane waves; the user's RTX run is the hardware evidence.
+- CI #146 for the matching main handoff also passed.
 
-On the user's checkout, pull the fix and rerun:
-```powershell
-git pull --ff-only origin feature/wave64-host-target
-git rev-parse --short HEAD
-cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
-```
-Expected HEAD: `8d2fe8b` or a newer descendant. If this passes, send the full test result; if it fails, send the failing assertion and output. The temporary diagnostic blocks are no longer expected.
+Next step:
+1. Build the feature branch release binary with `cargo build --release --locked -p r4y`.
+2. Run the user's normal R4Y launch flow with the affected title and inspect the newest `%LOCALAPPDATA%\\R4Y\\logs\\r4y-run.log`.
+3. Specifically compare the previously refused compute hashes `13dfdd3b1136e407` and `88994c3496045f51`: determine whether each now translates/creates a host pipeline and dispatches, or is still refused for a specific unsupported Wave64 pattern. Do not infer runtime success merely from the unit/integration suite.
+4. If the title run is stable and those pipeline paths are validated, then decide merge readiness. Keep PR #16 open until this real-title regression check is complete.
 
 ### 4.4 The failed hash extraction
 
