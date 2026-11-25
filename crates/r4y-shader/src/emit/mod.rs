@@ -1433,6 +1433,20 @@ mod host_wave_target_tests {
         let shader = translate(&mbcnt, nvidia).unwrap();
         assert_eq!(wave_size(&shader.dxil), Some(32));
 
+        let writelane = compute(
+            &[
+                0x7E0A_0280, // v_mov_b32 v5, 0
+                0xBE89_03AA, // s_mov_b32 s9, 42
+                0xD761_0005,
+                0x0001_5009, // v_writelane_b32 v5, s9, 40
+                0x7E04_0205, // v_mov_b32 v2, v5
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let shader = translate(&writelane, nvidia).unwrap();
+        assert_eq!(wave_size(&shader.dxil), Some(32));
+
         let branch = compute(
             &[
                 0x7E04_0281, // v_mov_b32 v2, 1
