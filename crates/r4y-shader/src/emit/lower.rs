@@ -215,6 +215,11 @@ struct Lower<'a> {
     /// Compute code that reads other lanes: thread ids follow the host
     /// lanes, so lane n is console lane n.
     console_lanes: bool,
+    /// A wave64 compute program whose cross-lane operations stay within each
+    /// 32-lane half, translated to two host waves of 32.
+    split: bool,
+    /// The console thread's flat group id, reconstructed from host wave and lane.
+    console_flat: Option<V>,
     /// Pixel: an ordered section (POPS), whose UAVs the host makes
     /// rasterizer-ordered views.
     pops: bool,
@@ -615,21 +620,27 @@ impl<'a> Lower<'a> {
         let root_memory = x.res.scalar.iter().any(|s| matches!(s.1.param, MEMORY | USER_DATA))
             || insts().any(|i| i.name().starts_with("image_bvh"));
         let mut console_lanes = false;
+        let mut split = false;
         if let StageIo::Cs(cs) = x.native.io {
             s.threads = Some(cs.threads);
             s.lds_dwords = cs.lds_bytes() / 4;
-            // Code reading other lanes needs the console's wave size and
-            // lane order; so do lane masks read as numbers, and LDS shared
-            // within one wave, where the console compiler leaves out barriers.
-            console_lanes = insts().any(|i| {
+            // DPP and ds_swizzle only address a 32-lane half. They can run
+            // unchanged on two host waves when a console wave64 is split.
+            let in_half = |i: &Inst| {
+                i.name().starts_with("ds_swizzle")
+                    || matches!(&i.fields, Fields::Valu(v) if v.dpp.is_some())
+            };
+            // These operations (and masks read as numbers) can reach the
+            // other half, so they still require a native 64-lane wave.
+            let whole = |i: &Inst| {
                 let n = i.name();
-                n.starts_with("ds_swizzle")
-                    || n.contains("permute")
+                n.contains("permute")
                     || n.starts_with("v_mbcnt")
                     || matches!(n, "v_readlane_b32" | "v_writelane_b32")
-                    || matches!(&i.fields, Fields::Valu(v) if v.dpp.is_some())
                     || reads_mask_as_data(x.st, i)
-            }) || {
+            };
+            let reads_whole = insts().any(whole);
+            let masks_held = {
                 // Masks held as numbers or constant lane sets: the lane
                 // tests its own bit by its console lane.
                 let whens = x.st.exits.iter().filter_map(|e| match *e {
@@ -653,9 +664,24 @@ impl<'a> Lower<'a> {
                         .any(|a| matches!(a, Atom::Opaque(_) | Atom::Constant(_)))
                 })
             };
+            console_lanes = reads_whole || masks_held || insts().any(in_half);
             let wave = if x.native.wave64 { 64 } else { 32 };
             let one_wave = cs.threads.iter().product::<u32>() <= wave;
-            if console_lanes || one_wave && s.lds_dwords > 0 {
+            // This is deliberately conservative: no LDS (the console may
+            // omit barriers between halves), no whole-wave sections, and no
+            // instruction whose source is the first lane of the 64-lane wave.
+            split = console_lanes
+                && x.native.wave64
+                && !reads_whole
+                && !insts().any(|i| i.name() == "v_readfirstlane_b32")
+                && !masks_held
+                && s.lds_dwords == 0
+                && !x.target.runs(64)
+                && x.target.runs(32)
+                && (0..p.blocks.len()).all(|b| super::wave::sections(p, b).is_empty());
+            if split {
+                s.wave_size = Some(32);
+            } else if console_lanes || one_wave && s.lds_dwords > 0 {
                 s.wave_size = Some(wave);
             }
         }
@@ -749,6 +775,8 @@ impl<'a> Lower<'a> {
             heap: [false; 2],
             src0: None,
             console_lanes,
+            split,
+            console_flat: None,
             pops: matches!(x.native.io, StageIo::Ps { db_shader_control, .. }
                 if db_shader_control & 1 << 16 != 0),
             root_memory,
@@ -2876,23 +2904,18 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
-    /// Component `c` of the thread id in the group. With console lanes, the
-    /// thread is relabelled so that its host lane is its console lane: the
-    /// flat id is the wave's first lane's, rounded down to the wave size,
-    /// plus the lane index. (A bijection while each host wave holds a
-    /// wave-aligned run of flat ids, as the console's waves do.)
-    fn thread_id(&mut self, c: u8) -> Val {
-        if !self.console_lanes {
-            return self.compute_id("threadIdInGroup.i32", 95, c);
+    /// The console thread's flat id in the group. On a split host, the
+    /// first lane of each 32-lane host wave supplies its base (0, 32, ...).
+    fn console_flat(&mut self) -> V {
+        if let Some(flat) = self.console_flat {
+            return flat;
         }
-        let [x, y, _] = self.s.threads.expect("compute");
         let e = self.s.entry;
-        let i32t = self.s.t.i32;
         let flat = self.s.op(
             e,
             "flattenedThreadIdInGroup.i32",
             Attr::ReadNone,
-            i32t,
+            self.s.t.i32,
             96,
             &[],
         );
@@ -2900,7 +2923,7 @@ impl<'a> Lower<'a> {
             e,
             "waveReadLaneFirst.i32",
             Attr::NoUnwind,
-            i32t,
+            self.s.t.i32,
             118,
             &[flat],
         );
@@ -2908,8 +2931,28 @@ impl<'a> Lower<'a> {
         let mask = self.s.m.i32(!(wave - 1));
         let base = self.s.m.bin(e, Bin::And, first, mask);
         let lane = self.lane_index();
-        let f = self.s.m.bin(e, Bin::Add, base, lane);
+        let flat = self.s.m.bin(e, Bin::Add, base, lane);
         self.s.flags |= flags::WAVE_OPS;
+        self.console_flat = Some(flat);
+        flat
+    }
+
+    /// This lane's original console lane number (0..63).
+    fn console_lane(&mut self) -> V {
+        let flat = self.console_flat();
+        let mask = self.s.m.i32(63);
+        self.s.m.bin(self.s.entry, Bin::And, flat, mask)
+    }
+
+    /// Component `c` of the thread id in the group. With console lanes, the
+    /// thread is relabelled so that its host lane is its console lane.
+    fn thread_id(&mut self, c: u8) -> Val {
+        if !self.console_lanes {
+            return self.compute_id("threadIdInGroup.i32", 95, c);
+        }
+        let [x, y, _] = self.s.threads.expect("compute");
+        let e = self.s.entry;
+        let f = self.console_flat();
         let (xk, yk, xy) = (self.s.m.i32(x), self.s.m.i32(y), self.s.m.i32(x * y));
         Val::I32(match c {
             0 => self.s.m.bin(e, Bin::URem, f, xk),
@@ -5340,7 +5383,10 @@ impl<'a> Lower<'a> {
         if let Some((rows, banks)) = masks {
             // Row (16 lanes) and bank (4 lanes of a row) write masks.
             let (four, two, three) = (k(self, 4), k(self, 2), k(self, 3));
-            let ri = self.s.m.bin(c, Bin::LShr, lane, four);
+            // Row masks are indexed by the console's four 16-lane rows.
+            // The upper half of a split wave is host rows 0/1 but console rows 2/3.
+            let row_lane = if self.split { self.console_lane() } else { lane };
+            let ri = self.s.m.bin(c, Bin::LShr, row_lane, four);
             let ri = self.s.m.bin(c, Bin::And, ri, three);
             let bi = self.s.m.bin(c, Bin::LShr, lane, two);
             let bi = self.s.m.bin(c, Bin::And, bi, three);
