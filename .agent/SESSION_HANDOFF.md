@@ -138,7 +138,8 @@ Observed in the user's 2026-11-25 diagnostics run:
 Active implementation:
 - PR #16: https://github.com/cmyk-ux/r4y/pull/16
 - Branch: `feature/wave64-host-target`
-- Latest code/test commit at this handoff update: `f82f97dc1fc8207fc2b2e40ca5a7128a8feddf88`
+- Last Wave64 implementation commit: `f82f97dc1fc8207fc2b2e40ca5a7128a8feddf88`
+- Follow-up RTX 3070 test-oracle correction: `1455d18dc2c69c0c1c6acc3fca0bfe82fdb75728` (test-only; no production lowering changed)
 - Latest successful CI: run #123 — https://github.com/cmyk-ux/r4y/actions/runs/45568252909
 - PR title: **Add host-aware Wave64 split and console-flow translation**. Keep the PR open until the user's RTX 3070 dispatch test and GTA VI runtime comparison have been completed.
 
@@ -181,17 +182,23 @@ Validation, CI run #123 on commit `f82f97d`:
 - Therefore the code and translation regressions are CI-validated; the Wave32 GPU dispatch and runtime behavior are **not yet hardware-validated**.
 
 Next actions:
-1. On the user's RTX 3070 checkout, run:
-   ```powershell
-   cd C:\Users\dysu\Downloads\r4y\r4y
-   git fetch origin feature/wave64-host-target
-   git switch feature/wave64-host-target
-   cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
-   ```
-   If the checkout path differs, use the actual local R4Y root. Expected startup capability is `lanes_min=32 lanes_max=32`; the test must execute (not skip) and match the expected per-lane output for every in-half and console-flow kernel.
-2. If that test passes, build `cargo build --release --locked -p r4y`, run GTA VI with focused diagnostics, and compare previously refused hashes `13dfdd3b1136e407` and `88994c3496045f51`. Separate pipelines fixed by this work from patterns still refused by the deliberate limitations.
-3. If the RTX dispatch test fails, preserve the failing kernel/assertion and fix that exact semantic issue before expanding support.
+1. Pull the test-oracle correction from `feature/wave64-host-target` and rerun the D3D12 command on the RTX 3070 (PowerShell command below). It must execute, not skip, and all in-half plus console-flow kernels must pass.
+2. If the hardware test passes, build `cargo build --release --locked -p r4y`, run GTA VI with focused diagnostics, and compare previously refused hashes `13dfdd3b1136e407` and `88994c3496045f51`. Separate pipelines fixed by this work from patterns still refused by the deliberate limitations.
+3. If another hardware assertion fails, preserve the exact kernel/assertion and diagnose its semantics before expanding support.
 4. Then resume the slot-zero SRV Texture1D/Texture2D provenance investigation and issue #4 descriptor virtualization. Do not confuse the Wave64 work with either descriptor issue.
+
+RTX 3070 hardware result (2026-11-25):
+- The user ran `cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output` on the Wave32 adapter.
+- In-half DPP/swizzle lane-order dispatch passed for group sizes 64, 128 and 32. This is a real local D3D12 execution, unlike the hosted CI skip.
+- The DPP row-mask case passed for 64 threads and failed for 128. Actual output for lanes 64..95 was 64..95; the old expected output was 0..31. This exposed a test-oracle error: row-mask selection repeats per console Wave64 (`lane % 64`), while the value in `v0` remains the flat GroupThreadID (64..95 in the second console wave). The correct expected expression is `if console_lane < 32 { lane } else { 1 }`.
+- Inspected `lower.rs::dpp()` confirms the split path uses `console_lane()` only for the row-mask row index; the DPP source value remains the original lane value. No production change was justified by this failure.
+- Corrected the test-only expectation in `split_tests.rs` on commit `1455d18dc2c69c0c1c6acc3fca0bfe82fdb75728`. The hardware test has **not yet been rerun after this correction**. The subsequent ballot/cross-half/branch/loop assertions were not reached in the failed run and remain hardware-unverified.
+
+On the user's existing checkout/branch, update and rerun:
+```powershell
+git pull --ff-only origin feature/wave64-host-target
+cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
+```
 
 ### 4.4 The failed hash extraction
 
