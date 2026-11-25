@@ -591,16 +591,18 @@ impl HostHeap {
     /// data: a host copy of a buffer is made on first use.
     pub(crate) fn mirror(&self, index: u32, handle: u64, for_draw: bool) -> Option<View> {
         if index >= self.count {
-            // Diagnostic (NVIDIA heap cap): the highest title slot past the
-            // host heap seen so far.
+            // Diagnostic (NVIDIA heap cap): title slots outside the mirrored
+            // range can overlap the host's transient descriptor slots.
             static HIGHEST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let previous = HIGHEST.fetch_max(index, std::sync::atomic::Ordering::Relaxed);
             if should_report_heap_overflow(previous, index) {
                 tracing::warn!(
                     index,
-                    count = self.count,
+                    title_slots = self.count,
+                    dynamic_slots = self.dynamic,
+                    host_slots = self.count + self.dynamic,
                     for_draw,
-                    "title slot past the host heap (high-water mark; one warning per 4096-slot range)"
+                    "title slot outside the mirrored title range (high-water mark; one warning per 4096-slot range)"
                 );
             }
             return None;
