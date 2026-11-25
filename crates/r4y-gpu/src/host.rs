@@ -250,12 +250,6 @@ fn create() -> windows::core::Result<Host> {
             device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         // A root signature carrying SAMPLER_HEAP_DIRECTLY_INDEXED requires
         // a shader-visible sampler heap even when the title has not bound one.
-        let sampler_seed: ID3D12DescriptorHeap =
-            device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
-                Type: D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-                NumDescriptors: 1,
-                ..Default::default()
-            })?;
         let default_samplers: ID3D12DescriptorHeap =
             device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                 Type: D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
@@ -272,13 +266,16 @@ fn create() -> windows::core::Result<Host> {
             ComparisonFunc: D3D12_COMPARISON_FUNC_NEVER,
             ..Default::default()
         };
-        device.CreateSampler(&default_sampler, sampler_seed.GetCPUDescriptorHandleForHeapStart());
-        device.CopyDescriptorsSimple(
-            r4y_shader::emit::HEAP_SAMPLERS,
-            default_samplers.GetCPUDescriptorHandleForHeapStart(),
-            sampler_seed.GetCPUDescriptorHandleForHeapStart(),
-            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-        );
+        // CopyDescriptorsSimple copies a contiguous source range; it cannot
+        // broadcast one descriptor over the whole destination heap. Create
+        // every slot explicitly so direct indices always address a valid sampler.
+        let sampler_size =
+            device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        let mut sampler_at = default_samplers.GetCPUDescriptorHandleForHeapStart();
+        for _ in 0..r4y_shader::emit::HEAP_SAMPLERS {
+            device.CreateSampler(&default_sampler, sampler_at);
+            sampler_at.ptr += sampler_size as usize;
+        }
         tracing::info!("host D3D12 device ready");
         // The console fuses its multiply-adds (`v_fma_f32`, `v_fmac_f32`,
         // `v_fma_mix*`); the lowering's DXIL `FMad` is fused only where the
