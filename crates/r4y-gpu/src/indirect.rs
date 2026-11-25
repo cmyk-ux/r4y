@@ -293,9 +293,9 @@ fn uav_barrier() -> D3D12_RESOURCE_BARRIER {
 mod tests {
     /// The clamp compiles with the system's compiler and the host takes it.
     #[test]
-    fn argument_clamp_builds_on_warp() {
-        let Some(host) = crate::host::Host::new_warp() else {
-            return; // WARP is not available on this Windows installation.
+    fn argument_clamp_builds_on_host() {
+        let Some(host) = crate::host::host() else {
+            return; // No usable D3D12 host adapter on this machine.
         };
         assert!(super::make_for(&host.device).is_ok());
     }
@@ -335,12 +335,12 @@ mod tests {
     }
 
     #[test]
-    fn count_limits_clamp_writes_on_warp() {
+    fn count_limits_clamp_writes_on_host() {
         use windows::Win32::Graphics::Direct3D12::*;
         use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 
-        let Some(host) = crate::host::Host::new_warp() else {
-            return; // WARP is not available on this Windows installation.
+        let Some(host) = crate::host::host() else {
+            return; // No usable D3D12 host adapter on this machine.
         };
         let bytes = 3 * 16u64;
         const SENTINEL: u32 = 0xDEAD_BEEF;
@@ -380,7 +380,7 @@ mod tests {
             ..Default::default()
         };
         let mut readback = None;
-        // SAFETY: plain creation of a readback buffer on the WARP device.
+        // SAFETY: plain creation of a readback buffer on the host device.
         unsafe {
             host.device
                 .CreateCommittedResource(
