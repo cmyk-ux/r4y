@@ -18,6 +18,7 @@ $script:RunTests = $false
 $script:Diagnostics = $false
 $script:LaunchOnly = $false
 $script:CheckMsvc = $false
+$script:TestNativeOutput = $false
 $script:TranscriptStarted = $false
 
 function Show-Help {
@@ -37,6 +38,7 @@ Options:
   --diagnostics   Build the diagnostics profile instead of normal release
   --launch        Launch the last configured game without running setup
   --check-msvc    Validate the Visual C++ build environment and exit
+  --test-native-output  Verify native stderr does not abort PowerShell
   --help          Show this help
 
 R4Y builds the one Rust workspace in this repository. No additional runtime is downloaded.
@@ -55,6 +57,7 @@ function Parse-Arguments([string]$Line) {
             '--diagnostics' { $script:Diagnostics = $true }
             '--launch' { $script:LaunchOnly = $true }
             '--check-msvc' { $script:CheckMsvc = $true }
+            '--test-native-output' { $script:TestNativeOutput = $true }
             '--help' { Show-Help; exit 0 }
             '-h' { Show-Help; exit 0 }
             default { throw ('Unknown option: ' + $Items[$i] + '. Use --help.') }
@@ -67,27 +70,108 @@ function Write-Info([string]$Message) { Write-Host ('  ' + $Message) -Foreground
 function Write-Ok([string]$Message) { Write-Host ('[OK] ' + $Message) -ForegroundColor Green }
 function Write-Warn([string]$Message) { Write-Host ('[!] ' + $Message) -ForegroundColor Yellow }
 
+function Enable-VirtualTerminal {
+    if ([Console]::IsOutputRedirected) { return $false }
+    try {
+        if (-not ('R4Y.ConsoleMode' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class R4YConsoleMode {
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint mode);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint mode);
+}
+'@ -ErrorAction Stop
+        }
+        $handle = [R4YConsoleMode]::GetStdHandle(-11)
+        [uint32]$mode = 0
+        if ($handle -eq [IntPtr]::Zero -or -not [R4YConsoleMode]::GetConsoleMode($handle, [ref]$mode)) {
+            return $false
+        }
+        return [R4YConsoleMode]::SetConsoleMode($handle, ($mode -bor 0x0004))
+    } catch {
+        return $false
+    }
+}
+
 function Show-Banner {
-    # Use code points to keep this PowerShell 5.1 script safe without a UTF-8 BOM.
-    $b = [string][char]0x2588
-    $s = [string][char]0x2592
-    $lines = @(
-        (' ' + ($b * 11) + '   ' + ($b * 5) + ' ' + ($b * 5) + '  ' + ($b * 5) + ' ' + ($b * 5)),
-        (($s * 2) + ($b * 3) + ($s * 5) + ($b * 3) + ' ' + ($s * 2) + ($b * 3) + ' ' + ($s * 2) + ($b * 3) + '  ' + ($s * 2) + ($b * 3) + ' ' + ($s * 2) + ($b * 3) + ' '),
-        (' ' + $s + ($b * 3) + '    ' + $s + ($b * 3) + '  ' + $s + ($b * 3) + '  ' + $s + ($b * 3) + ' ' + $b + ' ' + ($s * 2) + ($b * 3) + ' ' + ($b * 3) + '  '),
-        (' ' + $s + ($b * 10) + '   ' + $s + ($b * 11) + '  ' + ($s * 2) + ($b * 5) + '   '),
-        (' ' + $s + ($b * 3) + ($s * 5) + ($b * 3) + '  ' + ($s * 7) + ($b * 3) + $s + $b + '   ' + ($s * 2) + ($b * 3) + '    '),
-        (' ' + $s + ($b * 3) + '    ' + $s + ($b * 3) + '        ' + $s + ($b * 3) + $s + '     ' + $s + ($b * 3) + '    '),
-        (($b * 5) + '   ' + ($b * 5) + '       ' + ($b * 5) + '     ' + ($b * 5)),
-        (($s * 5) + '   ' + ($s * 5) + '       ' + ($s * 5))
+    # ASCII-style R4Y mark with Unicode block characters assembled by code point
+    # so Windows PowerShell 5.1 can read the script without a UTF-8 BOM.
+    $full = [string][char]0x2588
+    $shade = [string][char]0x2592
+    $logo = @(
+        ' FFFFFFFFFFF   FFFFF FFFFF  FFFFF FFFFF',
+        'SSFFFSSSSSFFF SSFFF SSFFF  SSFFF SSFFF ',
+        ' SFFF    SFFF  SFFF  SFFF F SSFFF FFF  ',
+        ' SFFFFFFFFFF   SFFFFFFFFFFF  SSFFFFF   ',
+        ' SFFFSSSSSFFF  SSSSSSSFFF SF   SSFFF    ',
+        ' SFFF    SFFF        SFFF S     SFFF    ',
+        ' FFFFF   FFFFF       FFFFF     FFFFF   ',
+        'SSSSS   SSSSS       SSSSS'
     )
-    # Do not clear the console: this also runs in hosts without a cursor handle.
-    foreach ($line in $lines) { Write-Host $line -ForegroundColor Cyan }
-    Write-Host ''
-    Write-Host 'R4Y - Recompile4You' -ForegroundColor White
+    $rows = @(
+        '                              .                         *                       .',
+        '                   *                    .                       *',
+        ''
+    )
+    foreach ($line in $logo) {
+        $rows += $line.Replace('F', $full).Replace('S', $shade)
+    }
+    $rows += @(
+        '',
+        '                         R 4 Y   //   R E C O M P I L E 4 Y O U',
+        '              NATIVE COMPATIBILITY  |  QUICK SETUP  |  INCREMENTAL BUILD',
+        ''
+    )
+
+    try { $Host.UI.RawUI.WindowTitle = 'R4Y - Recompile4You' } catch {}
+    $useVt = Enable-VirtualTerminal
+    $script:BannerRows = $rows.Count
+    $script:ScrollRegionActive = $false
+
+    if ($useVt) {
+        $esc = [char]27
+        $stops = @(@(112,43,255), @(239,48,157), @(255,133,55), @(53,125,255))
+        [Console]::Write("$esc[?25l")
+        foreach ($row in $rows) {
+            if ([string]::IsNullOrEmpty($row)) {
+                [Console]::WriteLine()
+                continue
+            }
+            $last = [Math]::Max(1, $row.Length - 1)
+            for ($i = 0; $i -lt $row.Length; $i++) {
+                $position = ($i / $last) * ($stops.Count - 1)
+                $segment = [Math]::Min($stops.Count - 2, [int][Math]::Floor($position))
+                $fraction = $position - $segment
+                $red = [int][Math]::Round($stops[$segment][0] + ($stops[$segment + 1][0] - $stops[$segment][0]) * $fraction)
+                $green = [int][Math]::Round($stops[$segment][1] + ($stops[$segment + 1][1] - $stops[$segment][1]) * $fraction)
+                $blue = [int][Math]::Round($stops[$segment][2] + ($stops[$segment + 1][2] - $stops[$segment][2]) * $fraction)
+                [Console]::Write(('{0}[38;2;{1};{2};{3}m{4}' -f $esc, $red, $green, $blue, $row[$i]))
+            }
+            [Console]::WriteLine("$esc[0m")
+        }
+
+        # Freeze the branding area; installer output scrolls only below it.
+        $scrollStart = $script:BannerRows + 1
+        [Console]::Write("$esc[$($scrollStart);r$esc[$($scrollStart);1H$esc[?25h")
+        $script:ScrollRegionActive = $true
+    } else {
+        foreach ($row in $rows) { Write-Host $row -ForegroundColor Cyan }
+    }
     Write-Host ''
 }
 
+function Reset-R4YScrollRegion {
+    if ($script:ScrollRegionActive) {
+        $esc = [char]27
+        try { [Console]::Write("$esc[r$esc[?25h") } catch {}
+        $script:ScrollRegionActive = $false
+    }
+}
 
 function Confirm-Action([string]$Question) {
     if ($script:AssumeYes) { return $true }
@@ -96,13 +180,25 @@ function Confirm-Action([string]$Question) {
 }
 
 function Invoke-Native([string]$Executable, [string[]]$NativeArgs, [string]$WorkingDirectory) {
-    $previous = Get-Location
+    $previousLocation = Get-Location
+    $previousErrorPreference = $ErrorActionPreference
     try {
         if ($WorkingDirectory) { Set-Location -LiteralPath $WorkingDirectory }
-        & $Executable @NativeArgs 2>&1 | ForEach-Object { Write-Host $_ }
+
+        # Windows PowerShell 5.1 converts native stderr into ErrorRecords.
+        # Cargo writes routine progress (for example, "Compiling ...") to stderr;
+        # with Stop, that first progress line aborts the build before the real
+        # compiler diagnostic is printed. Keep native stderr non-terminating.
+        $ErrorActionPreference = 'Continue'
+        & $Executable @NativeArgs 2>&1 | ForEach-Object {
+            Write-Host ([string]$_)
+        }
         $nativeExitCode = [int]$LASTEXITCODE
         return $nativeExitCode
-    } finally { Set-Location $previous }
+    } finally {
+        $ErrorActionPreference = $previousErrorPreference
+        Set-Location $previousLocation
+    }
 }
 
 function Get-VsWhere {
@@ -450,7 +546,7 @@ try {
         New-Item -ItemType Directory -Force -Path (Join-Path $script:LocalRoot 'logs') | Out-Null
         try { Start-Transcript -Path $script:LogPath -Append | Out-Null; $script:TranscriptStarted = $true } catch {}
     }
-    $exitCode = if ($script:LaunchOnly) { Invoke-Launch } elseif ($script:CheckMsvc) { Initialize-MsvcEnvironment; Write-Ok 'MSVC build environment is ready.'; 0 } else { Invoke-Setup }
+    $exitCode = if ($script:LaunchOnly) { Invoke-Launch } elseif ($script:CheckMsvc) { Initialize-MsvcEnvironment; Write-Ok 'MSVC build environment is ready.'; 0 } elseif ($script:TestNativeOutput) { $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'; $probeCode = Invoke-Native $windowsPowerShell @('-NoProfile', '-Command', '[Console]::Error.WriteLine(''R4Y native stderr probe''); exit 0') $script:Root; if ($probeCode -ne 0) { throw 'Native stderr handling probe failed.' }; Write-Ok 'Native stderr is handled without aborting the installer.'; 0 } else { Invoke-Setup }
 } catch {
     Write-Host ''
     Write-Host 'R4Y setup failed:' -ForegroundColor Red
@@ -458,6 +554,7 @@ try {
     Write-Host ('Log: ' + $script:LogPath) -ForegroundColor Yellow
     $exitCode = 1
 } finally {
+    Reset-R4YScrollRegion
     if ($script:TranscriptStarted) { try { Stop-Transcript | Out-Null } catch {} }
 }
 exit $exitCode
