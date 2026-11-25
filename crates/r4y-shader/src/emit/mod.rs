@@ -263,6 +263,28 @@ fn parse_group_sync(value: Option<&str>) -> u8 {
     }
 }
 
+/// Whether the Wave64-to-Wave32 fallback may exchange values across the two
+/// host waves with group-shared memory and group barriers. This is a
+/// diagnostic bypass, not a correctness workaround: affected shaders are
+/// refused when disabled. The setting is part of the shader-cache key.
+///
+/// Set `R4Y_WAVE64_CONSOLE_FLOW=0` to disable only this cross-half fallback;
+/// in-half Wave64 splitting remains enabled.
+pub fn wave64_console_flow() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_wave64_console_flow(std::env::var("R4Y_WAVE64_CONSOLE_FLOW").ok().as_deref())
+    })
+}
+
+/// Invalid or missing values preserve the enabled default. Pure, for testing.
+fn parse_wave64_console_flow(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(str::trim),
+        Some("0" | "false" | "off" | "no")
+    )
+}
+
 /// `R4Y_SHADER_LOOP_LIMIT`'s value; the default when it is unset,
 /// unreadable or 0. Pure, for testing.
 fn parse_loop_limit(value: Option<&str>) -> u32 {
@@ -465,6 +487,19 @@ pub fn emit_for(
     res: &resource::Resources,
     target: Target,
 ) -> Result<HostShader, ShaderError> {
+    emit_for_with_console_flow(c, native, p, st, io, res, target, wave64_console_flow())
+}
+
+fn emit_for_with_console_flow(
+    c: &Container,
+    native: &NativeProgram,
+    p: &ir::Program,
+    st: &structure::Structured,
+    io: &io::Io,
+    res: &resource::Resources,
+    target: Target,
+    allow_console_flow: bool,
+) -> Result<HostShader, ShaderError> {
     let sig = |fourcc| -> Result<Vec<container::SigElement>, ShaderError> {
         match c.part(fourcc) {
             Some(part) => signature(part.data),
@@ -535,7 +570,7 @@ pub fn emit_for(
     };
     let first = lower::lower(&parts(st, res, false));
     let l = match first {
-        Err(ShaderError::Unsupported { what: lower::CONSOLE_FLOW, .. }) => {
+        Err(ShaderError::Unsupported { what: lower::CONSOLE_FLOW, .. }) if allow_console_flow => {
             // Re-structure as the console does: all lanes follow the same
             // block sequence, while EXEC is retained as each instruction's
             // vector guard. Only the bounded one-wave/no-LDS subset is sent
@@ -682,7 +717,7 @@ fn signature(part: &[u8]) -> Result<Vec<container::SigElement>, ShaderError> {
 mod tests {
     use super::bitcode::Attr;
     use super::lower::LOOP_LIMIT;
-    use super::{parse_group_sync, parse_loop_limit};
+    use super::{parse_group_sync, parse_loop_limit, parse_wave64_console_flow};
 
     #[test]
     fn the_group_sync_switch_parses_or_falls_back() {
@@ -693,6 +728,17 @@ mod tests {
         for bad in ["", "-1", "3", "strict", "0x1"] {
             assert_eq!(parse_group_sync(Some(bad)), 2, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_wave64_console_flow_switch_parses_or_falls_back() {
+        assert!(parse_wave64_console_flow(None));
+        assert!(parse_wave64_console_flow(Some("1")));
+        assert!(parse_wave64_console_flow(Some("true")));
+        for disabled in ["0", "false", "off", "no"] {
+            assert!(!parse_wave64_console_flow(Some(disabled)), "{disabled:?}");
+        }
+        assert!(parse_wave64_console_flow(Some("unknown")));
     }
 
     #[test]
@@ -1288,18 +1334,35 @@ mod tests {
 
 #[cfg(test)]
 mod host_wave_target_tests {
-    use super::{Container, Target, emit_for};
+    use super::{Container, Target, emit_for, emit_for_with_console_flow};
     use crate::native::{ComputeIo, HwStage, NativeProgram, StageIo};
     use crate::{ShaderError, io, ir, resource, structure};
 
     fn translate(native: &NativeProgram, target: Target) -> Result<super::HostShader, ShaderError> {
+        translate_with_console_flow(native, target, true)
+    }
+
+    fn translate_with_console_flow(
+        native: &NativeProgram,
+        target: Target,
+        allow_console_flow: bool,
+    ) -> Result<super::HostShader, ShaderError> {
         let bytes = crate::dxbc::build(&[]);
         let container = Container::parse(&bytes)?;
         let p = ir::build(&native.patched_code(), native.wave64, native.vgprs)?;
         let st = structure::structure(&p)?;
         let resources = resource::track(&p, &native.layout, native.stage, Some(&st))?;
         let raised = io::raise(&p, native)?;
-        emit_for(&container, native, &p, &st, &raised, &resources, target)
+        emit_for_with_console_flow(
+            &container,
+            native,
+            &p,
+            &st,
+            &raised,
+            &resources,
+            target,
+            allow_console_flow,
+        )
     }
 
     fn compute(words: &[u32], wave64: bool) -> NativeProgram {
@@ -1367,6 +1430,13 @@ mod host_wave_target_tests {
 
         assert_eq!(wave_size(&translate(&wave64_read_lane, nvidia).unwrap().dxil), Some(32));
         assert_eq!(wave_size(&translate(&wave64_read_lane, rdna).unwrap().dxil), Some(64));
+        assert!(matches!(
+            translate_with_console_flow(&wave64_read_lane, nvidia, false),
+            Err(ShaderError::Unsupported {
+                what: lower::CONSOLE_FLOW,
+                ..
+            })
+        ));
         assert!(translate(&wave64_read_lane, Target::ANY).is_ok());
 
         // A group containing multiple console waves is not allowed to use a
