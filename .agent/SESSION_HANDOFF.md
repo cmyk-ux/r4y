@@ -431,3 +431,52 @@ Therefore, a previous recommendation to build only \`--release\` does **not** re
 3. First verify that the new log contains \`host wave sizes lanes_min=32 lanes_max=32\` (or the actual reported values) and the expected no-64-lane warning. Only then assess remaining Wave64 shader failures.
 4. Re-check the two target hashes and all refusal hashes using a corrected extraction script. Do not treat shader-cache hits as proof that the currently checked-in translator generated those cache entries until the selected binary/cache fingerprint is verified.
 5. Keep slot-zero SRV mismatch and descriptor virtualization as independent investigations; do not conflate them with Wave64 or the stale-binary/profile concern.
+
+
+## 10. Correct Diagnostics runtime — target Wave64 pipelines now created; title still crashes (2026-11-25)
+
+The user rebuilt and launched the profile selected by install-state.json (Diagnostics). This corrected the prior stale-profile ambiguity.
+
+### Confirmed on the correct runtime
+
+From the new LOCALAPPDATA R4Y run log:
+
+- Device initialization explicitly logs host wave sizes lanes_min=32 lanes_max=32, followed by the warning that the host has no 64-lane waves. This confirms the current Diagnostics binary contains host-wave-aware initialization on the RTX 3070.
+- Both previously problematic compute shaders were translated freshly (not from the previous cache):
+  - 88994c3496045f51: cached=false, 8 ms; host pipeline created at 09:34:58.785.
+  - 13dfdd3b1136e407: cached=false, 10 ms; host pipeline created at 09:34:58.802.
+- Both subsequently reached first bind:
+  - 13dfdd3b1136e407 at 09:35:44.620, frame 1168.
+  - 88994c3496045f51 at 09:36:07.518, frame 1186.
+- The focused extraction returned no host pipeline refused rows and no D3D12 debug-layer Shader wants wave lane count of 64 messages for this run. The previous run had 136 PSO refusal rows and 168 such Wave64 warnings. This is strong evidence that the targeted Wave64 split now makes those two actual title pipelines successfully on the Wave32 RTX 3070. The previous failures are no longer valid for this freshly built runtime.
+- Do not claim the entire game's Wave64 workload is supported. The first 25 shader does not translate rows include deliberate/known unsupported cases, e.g. a select on an untracked mask, descriptors not loaded or built, direct lane-mask data reads, LDS sharing without barriers on a Wave32 host, and general console Wave64 lanes. These are separate shader-lowering limitations and need triage by relevance to crash.
+- User reports loading took substantially longer, then the screen went black and the game crashed as before. This timing is not yet causally attributed. First-time target-specific shader translations (cached=false), PSO/library behavior, diagnostics instrumentation and GPU-based validation are potential overheads; do not assume Wave64 implementation itself caused the longer load.
+
+### Crash-report facts
+
+The end of the log includes a title Breakpad report at 09:37:38:
+- Game Version: 930.048.020 / build 930.048.020-vb_sub_story.
+- device.model: Xbox Series X; platform: scarlett.
+- memory.load_percent=92.
+- system.memory.free=2604432; units are not explicitly labelled in this log excerpt. Treat this as a pressure signal only, not a definitive available-memory measurement.
+- Breakpad added crashcontext.log from path T:/r4y-20261125-063738-20352.crash.log.
+- It added upload_file_minidump from T:/00000000-0000-0000-0000-000000000000.dmp (~37,456,412 bytes).
+- Upload destination was submit.backtrace.io:443, but R4Y's network HLE logged HTTP connection blocked destination=submit.backtrace.io:443.
+- This is a title-side crash report, not yet proof of a D3D12 device removal. The prior focused search returned no DXGI_ERROR_DEVICE, DEVICE_HUNG, DEVICE_REMOVED or DRED markers. Keep title/Breakpad exception and GPU device removal distinct.
+
+### Next action — inspect crashcontext file and R4Y tail
+
+Ask the user to run focused PowerShell against the exact crashcontext path:
+1. Check whether T:/r4y-20261125-063738-20352.crash.log still exists.
+2. If it exists, print its first 100 and last 180 lines, with line numbers; additionally print lines matching exception/crash/assert/fatal/callstack/stack/unknown-symbol/failed and surrounding lines.
+3. If it does not exist, inspect the R4Y run log for crash report heading, exception code, faulting module/address, call stack, crash thread and title log lines immediately before 09:37:38.
+4. Also capture the run's frame timing / drop summaries between 09:35 and crash, and check whether device-removed reason was logged.
+5. Do not ask for the 37 MB minidump or the entire R4Y log. Ask for line-oriented, targeted PowerShell output only.
+
+After receiving crashcontext evidence, correlate the crashing subsystem/thread with the last GPU submits, dropped dispatches, descriptor warnings and memory pressure. Keep the already-fixed target shader pipeline creation as a regression success; do not roll it back while investigating this separate title crash.
+
+### Current project state
+
+- Local test checkout: feature/wave64-host-target, HEAD a24552a.
+- PR #16 remains open. Its intended runtime regression check now has materially improved evidence: the two named pipelines create and bind on the RTX 3070. Do not merge until the new crash is understood or the user explicitly elects to merge with the remaining limitation documented.
+- Slot-zero SRV Texture2D-vs-Texture1D mismatch persisted in the earlier diagnostics log and remains a separate issue; the newest pasted extraction did not include the GBV pattern, so its status on this exact run is unknown.
