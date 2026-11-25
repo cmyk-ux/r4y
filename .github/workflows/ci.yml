@@ -55,8 +55,8 @@ jobs:
       # The hosted runner has no guaranteed RDNA2/Wave32 GPU. These two
       # hardware-reference tests remain enabled for local supported hardware.
       - name: Tests
-        run: cargo test --workspace --locked -- --skip gathers_at_a_level_match_the_hardware --skip permutes_read_the_lane_named_and_zero_from_lanes_left_out --skip in_half_lane_reads_match_console_on_d3d12_hardware
+        run: cargo test --workspace --locked -- --skip gathers_at_a_level_match_the_hardware --skip permutes_read_the_lane_named_and_zero_from_lanes_left_out --skip wave64_split_matches_console_on_d3d12_hardware
       # Keep the skip reason visible: a green hosted-runner job is not proof
       # that the lane-by-lane D3D12 test found a suitable adapter.
       - name: Verify in-half wave64 on an available D3D12 adapter
-        run: cargo test -p r4y-shader --locked in_half_lane_reads_match_console_on_d3d12_hardware -- --show-output
+        run: cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
