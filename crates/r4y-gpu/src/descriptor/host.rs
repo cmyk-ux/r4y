@@ -80,8 +80,6 @@ pub(crate) fn near_heaps(va: u64) -> String {
 
 /// The host's limit for shader-visible view heaps on resource binding
 /// tiers 1 and 2; tier 3 hardware may take more.
-const PORTABLE_VIEWS: u32 = 1_000_000;
-
 /// Slots past the title's in a view heap, for tables a draw needs made
 /// afresh (constant buffers copied per draw). A list holds the slots it
 /// took until it is reset (its submissions have run) or released.
@@ -137,7 +135,7 @@ pub(crate) fn host_views(views: u32) {
     r4y_shader::emit::set_view_heap(views, title);
 }
 
-/// Whether a new maximum deserves an overflow warning.
+// Whether a new maximum deserves an overflow warning.
 
 /// High descriptor heaps are populated in runs of consecutive slots. Keep
 /// the highest observed index, but emit at most one warning per 4096-slot
@@ -1503,9 +1501,9 @@ mod tests {
 
     #[test]
     fn capped_layout_reserves_non_overlapping_dynamic_pairs_and_null_slots() {
-        assert_eq!(capped_layout(PORTABLE_VIEWS), (721_469, DYNAMIC, CAPPED_PAIRS));
+        assert_eq!(capped_layout(r4y_shader::emit::HEAP_VIEWS_PORTABLE), (721_469, DYNAMIC, CAPPED_PAIRS));
         assert_eq!(capped_layout(4096), (1537, 2046, 510));
-        for views in [4, 64, 4096, PORTABLE_VIEWS] {
+        for views in [4, 64, 4096, r4y_shader::emit::HEAP_VIEWS_PORTABLE] {
             let (title, dynamic, pairs) = capped_layout(views);
             assert_eq!(title + dynamic + pairs + 3, views);
             assert!(title <= views - 3);
@@ -1516,7 +1514,7 @@ mod tests {
     /// Exercises their boundaries on a real D3D12 device when one is available.
     #[test]
     fn capped_heap_keeps_dynamic_slots_pairs_and_null_views_disjoint() {
-        assert_eq!(capped_layout(PORTABLE_VIEWS), (721_469, DYNAMIC, CAPPED_PAIRS));
+        assert_eq!(capped_layout(r4y_shader::emit::HEAP_VIEWS_PORTABLE), (721_469, DYNAMIC, CAPPED_PAIRS));
         assert_eq!(capped_layout(4096), (1537, 2046, 510));
 
         let Some(host) = host() else {
@@ -1539,6 +1537,8 @@ mod tests {
         assert_eq!(heap.pair(), Some(1537));
 
         let (_, strides) = heap.strides.as_ref().expect("view-stride table");
+        // SAFETY: HostHeap::sized allocated `views` mapped dwords;
+        // the three queried indices are strictly below that capacity.
         let stride = |index: u32| unsafe {
             (*strides as *const u32).add(index as usize).read_volatile()
         };
