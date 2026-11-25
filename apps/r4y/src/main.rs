@@ -78,7 +78,7 @@ enum Command {
     /// translator and report what it cannot handle yet.
     Translate {
         paths: Vec<PathBuf>,
-        /// Check emitted DXIL with dxil.dll's validator (`VICTORY_DXIL`,
+        /// Check emitted DXIL with dxil.dll's validator (`R4Y_DXIL`,
         /// else the newest Windows SDK's).
         #[arg(long)]
         validate: bool,
@@ -139,7 +139,7 @@ enum Console {
 fn main() -> Result<()> {
     install_legacy_environment_aliases();
     r4y_core::logging::init("info");
-    // The audio recorder `run` starts for `VICTORY_AUDIO_CAPTURE`.
+    // A child process used by the diagnostics audio recorder exits here.
     #[cfg(all(windows, feature = "diagnostics"))]
     if r4y_hle::modules::audio::capture::child() {
         return Ok(());
