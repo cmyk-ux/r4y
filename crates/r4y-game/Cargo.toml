@@ -1,6 +1,6 @@
 [package]
 name = "r4y-game"
-description = "Everything specific to Grand Theft Auto VI: its containers, build identities, patches."
+description = "Title-specific containers, build identities, format adapters and pipeline metadata."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
