@@ -46,6 +46,14 @@ const CROSS_HALF_READ: &[u32] = &[
     0x7E04_0209, // v_mov_b32 v2, s9
 ];
 
+const CROSS_HALF_WRITE: &[u32] = &[
+    0x7E0A_0280, // v_mov_b32 v5, 0
+    0xBE89_03AA, // s_mov_b32 s9, 42
+    0xD761_0005,
+    0x0001_5009, // v_writelane_b32 v5, s9, 40
+    0x7E04_0205, // v_mov_b32 v2, v5
+];
+
 const BRANCH_EXCHANGE: &[u32] = &[
     0x7E04_0281, // v_mov_b32 v2, 1
     0x7D88_0094, // v_cmp_gt_u32 vcc, 20, v0
@@ -282,6 +290,14 @@ fn wave64_split_matches_console_on_d3d12_hardware() {
         let out = run(&host, target, &native, 2)
             .unwrap_or_else(|error| panic!("cross-half v_readlane: {error}"));
         assert_eq!(out, vec![40; 128], "v_readlane must reach lane 40");
+
+        let native = program(CROSS_HALF_WRITE, 64);
+        let out = run(&host, target, &native, 2)
+            .unwrap_or_else(|error| panic!("cross-half v_writelane: {error}"));
+        let want: Vec<u32> = (0..2)
+            .flat_map(|_| (0..64).map(|lane| if lane == 40 { 42 } else { 0 }))
+            .collect();
+        assert_eq!(out, want, "v_writelane must address console lane 40");
 
         let native = program(BRANCH_EXCHANGE, 64);
         let out = run(&host, target, &native, 2)
