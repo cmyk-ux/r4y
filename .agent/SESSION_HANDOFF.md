@@ -352,3 +352,44 @@ The user resumed from the "Corrigir teste DPP" session and asked to continue wit
 1. Re-check CI #165 to its terminal conclusion. If Clippy/build/tests fail, inspect the exact failing step and fix it; do not mistake a successful parser step for full CI success.
 2. Check the main push CI for commit `128e3d1` if the available Actions listing exposes it; the current connector's `fetch_commit_workflow_runs` wrapper is PR-filtered.
 3. Keep PR #16 open until the already documented RTX 3070 Wave64 test and affected-title runtime regression check are accounted for. The earlier user RTX 3070 DPP/Wave64 dispatch suite passed; installer CI parser errors were independent and prevented the hosted run from reaching its D3D12 step.
+
+
+## 8. Runtime log collection protocol
+
+The user cannot upload the full runtime log into chat and expects the assistant to request **specific, narrow PowerShell extractions**. Do not ask them to paste a clipboard dump, the full log, or hundreds of generic keyword matches.
+
+### Required approach
+
+- First identify the exact subsystem and unresolved question from the current investigation (for example, Wave64 pipeline translation, descriptor slot-zero SRV dimensions, descriptor heap bounds, D3D12 device removal/DRED).
+- Give a ready-to-run PowerShell snippet that reads the path held in the variable $path, initialized as shown below.
+- Use Select-String -LiteralPath $path -Pattern with specific phrases or regexes, constrain results with Select-Object -First N or -Last N, and print each match with its line number in the form L{LineNumber}: {Line}.
+- Group a few closely related questions under clear Write-Host headings. Include exact hashes, error strings, or subsystem phrases already observed in the code/logs. Avoid broad generic patterns such as error|warn|shader|pipeline|d3d12 that match most of the file.
+- If context is required, request a small surrounding window around matching line numbers (for example, Get-Content with calculated start/end indices) rather than dumping all matches. Keep output to a manageable number of lines.
+- Prefer raw matching lines first. Only request expanded context or a second extraction after seeing the returned evidence.
+- Do not tell the user to press Ctrl+V after copying a report unless the actual report content has been included in their message; clipboard contents are not automatically visible to the assistant.
+- Do not make the user choose the log patterns. The assistant owns selecting the evidence needed for the next diagnostic decision.
+
+### Example: current Wave64 runtime follow-up
+
+When checking the affected title after the Wave64 implementation, a focused first pass can request:
+
+\`\`\`powershell
+$path = "$env:LOCALAPPDATA\\R4Y\\logs\\r4y-run.log"
+
+Write-Host "\`n===== TARGET HASHES ====="
+Select-String -LiteralPath $path -Pattern '13dfdd3b1136e407|88994c3496045f51' |
+    Select-Object -Last 30 |
+    ForEach-Object { "L$($_.LineNumber): $($_.Line)" }
+
+Write-Host "\`n===== WAVE64 REFUSALS / HOST PIPELINE REJECTIONS ====="
+Select-String -LiteralPath $path -Pattern 'wave lane count of 64|host pipeline refused|wave64|split wave64' |
+    Select-Object -Last 40 |
+    ForEach-Object { "L$($_.LineNumber): $($_.Line)" }
+
+Write-Host "\`n===== D3D12 DEVICE REMOVAL / DRED ====="
+Select-String -LiteralPath $path -Pattern 'DXGI_ERROR_DEVICE|DEVICE_HUNG|DEVICE_REMOVED|DRED|breadcrumb|device removed|device hung|page.?fault VA' |
+    Select-Object -Last 25 |
+    ForEach-Object { "L$($_.LineNumber): $($_.Line)" }
+\`\`\`
+
+This example is a starting point, not a fixed template: change the patterns to match the actual open question. The previous broad 900-line extraction was excessive and should not be repeated.
