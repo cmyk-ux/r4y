@@ -748,6 +748,7 @@ fn fmad_probe() -> Result<HostShader, crate::ShaderError> {
         prims: Vec::new(),
         mesh_stride: 0,
         target: super::Target::ANY,
+        console_cf: false,
     })?;
     Ok(HostShader {
         stage: HwStage::Cs,
