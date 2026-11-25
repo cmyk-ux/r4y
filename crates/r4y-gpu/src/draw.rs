@@ -841,11 +841,19 @@ impl State {
 
     /// Gives the host list the title's heaps if it has others.
     fn bind_heaps(&mut self, list: &HostList, memory_heap: bool) {
-        let want = if memory_heap {
-            [MEMORY_HEAP, self.heaps[1]]
+        let Some(host) = crate::host::host() else { return };
+        let sampler_heap = if self.heaps[1] != 0 {
+            crate::descriptor::heap(self.heaps[1] as This).host().map(|h| h.heap.clone())
         } else {
-            self.heaps
+            Some(host.default_samplers.clone())
         };
+        let sampler_key = sampler_heap
+            .as_ref()
+            .map_or(0, |heap| heap.as_raw() as usize);
+        let want = [
+            if memory_heap { MEMORY_HEAP } else { self.heaps[0] },
+            sampler_key,
+        ];
         if self.host_heaps != want {
             let mut heaps: Vec<Option<ID3D12DescriptorHeap>> = self
                 .heaps
@@ -856,6 +864,14 @@ impl State {
                 .collect();
             if memory_heap && let Some(h) = crate::memory::heap() {
                 heaps.insert(0, Some(h.heap.clone()));
+            }
+            // A directly-indexed sampler heap is mandatory when the root
+            // signature carries SAMPLER_HEAP_DIRECTLY_INDEXED. Use a valid
+            // default heap when the title has not bound its own.
+            if let Some(sampler_heap) = sampler_heap {
+                if !heaps.iter().flatten().any(|heap| heap.as_raw() == sampler_heap.as_raw()) {
+                    heaps.push(Some(sampler_heap));
+                }
             }
             heaps.iter().flatten().for_each(|h| list.keep(h));
             // SAFETY: an open list and shader-visible heaps.
