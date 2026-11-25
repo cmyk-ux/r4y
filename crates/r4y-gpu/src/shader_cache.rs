@@ -88,6 +88,7 @@ fn build() -> &'static [u8; 32] {
 /// This file, whose `encode` and `decode` define the entries.
 const ENCODING: &[u8] = include_bytes!("shader_cache.rs");
 
+#[cfg(test)]
 fn key(translator: &str, encoding: &[u8], limit: u32, views: u32, title: u32, group_sync: u8) -> [u8; 32] {
     key_for_target(translator, encoding, limit, views, title, group_sync, Target::ANY)
 }
