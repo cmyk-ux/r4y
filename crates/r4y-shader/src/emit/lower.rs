@@ -10137,6 +10137,7 @@ mod tests {
             prims: vec![],
             mesh_stride: 0,
             target: super::super::Target::ANY,
+            console_cf: false,
         })
         .map(|_| ())
     }
@@ -10188,6 +10189,7 @@ mod tests {
             prims: vec![],
             mesh_stride: 0,
             target: super::super::Target::ANY,
+            console_cf: false,
         })
     }
 
@@ -10343,6 +10345,7 @@ mod tests {
             prims: vec![],
             mesh_stride: 0,
             target: super::super::Target::ANY,
+            console_cf: false,
         }).unwrap();
 
         let container =
