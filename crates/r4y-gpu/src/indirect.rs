@@ -461,6 +461,9 @@ mod tests {
             assert_eq!(&result[..4], &[0x11, 0x2, 0x3, 0x4]);
             assert_eq!(&result[4..], &[SENTINEL; 8]);
             readback.Unmap(0, None);
+            let original = std::slice::from_raw_parts(source_data.cast::<u32>(), source_words.len());
+            assert_eq!(original, &source_words, "the clamp must not modify the title's input buffer");
+            assert_eq!(count_data.cast::<u32>().read(), 1);
         }
     }
 }
