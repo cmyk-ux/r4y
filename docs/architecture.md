@@ -40,9 +40,9 @@ title's), so a run finds them under the names it gives them itself.
 | `r4y-hle` | console API implementations, host pass-through policy |
 | `r4y-gpu` | D3D12.X objects, command lists and GPU memory → host D3D12 |
 | `r4y-shader` | Xbox shader containers → host shaders |
-| `r4y-formats` | the GPU's texture layouts (sizes, tiling, detiling), audio codecs; planned: BCPack |
+| `r4y-formats` | texture layouts (sizes, tiling, detiling), BCPack data and audio codecs |
 | `r4y-pipeline` | converter trait, content-addressed cache |
-| `r4y-game` | Grand Theft Auto VI-specific formats, build identities, hooks |
+| `r4y-game` | title-specific format adapters, build identities, hooks and pipeline metadata |
 | `apps/r4y` | command-line front end |
 | `xtask` | asset-policy check, git hooks |
 | `tests/fixtures/hle-probe` | a stand-in "title" (our own code) for loader tests |
