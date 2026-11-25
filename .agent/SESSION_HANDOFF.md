@@ -959,3 +959,16 @@ All changes are on `feature/wave64-host-target`, which updates PR #16. The PR re
 3. Keep the next extraction narrow: the DRED `host GPU failure` line and its associated `breadcrumbs`, `a list stopped at`, `commands ... between its barriers`, and converter marker lines; plus only the `slow host list` block if a new one occurs.
 4. Compare whether pipeline sync barriers change the TDR behavior. If the device still stops in a prelude converter dispatch, investigate the conversion's resource states, source/destination footprints, and the exact stopped route before changing its shader.
 5. Inspect the `42683eebec081520` dispatch independently if it remains a multi-second outlier; it is not yet causally linked to the later removal.
+
+
+### First CI failure and compile-fix follow-up (2026-11-25)
+
+- CI #195 on `e841f47` was **cancelled after Clippy failed**. The actual compile diagnostics were:
+  1. `host.rs` referenced `prelude_notes` from a code path compiled without the `diagnostics` feature; the field itself is diagnostics-gated.
+  2. `twin::route()` was a second production callsite of `Twin::copy` and also needed the new marker callback.
+  3. The destination footprint is `D3D12_PLACED_SUBRESOURCE_FOOTPRINT`; its nested layout is `.Footprint.Format` and `.Footprint.RowPitch`, not direct `.Format` / `.RowPitch`.
+- Corrections:
+  - `9a5c387033b87c52e9815b7820b2ac2202da6cf6`: updated the second `Twin::copy` call in `twin::route()` to attach the per-dispatch marker to the main list too, and corrected the nested destination footprint fields.
+  - `6b4c0b93d2c8322220e96c936721a4f495196c7e`: kept the no-completed-command fallback for prelude metadata inside the diagnostics feature gate.
+- Latest exact code commit at this note: `6b4c0b93d2c8322220e96c936721a4f495196c7e`.
+- CI run #198 for that exact code commit was queued when this note was written: https://github.com/cmyk-ux/r4y/actions/runs/45631278366. Do not claim success until completed.
