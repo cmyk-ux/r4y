@@ -431,7 +431,7 @@ fn peek(when: &str) {
 pub(crate) fn read_indirect(
     list: &crate::host::HostList,
     args: (&ID3D12Resource, u64),
-    count: Option<(&ID3D12Resource, u64)>,
+    count: Option<(&ID3D12Resource, u64, u32)>,
     (kind, stride, max): (u32, u32, u32),
     name: String,
 ) {
@@ -471,15 +471,15 @@ pub(crate) fn read_indirect(
         let Some(buffer) = buffer else { return };
         l.ResourceBarrier(&[transition(args.0, arg_state, copy)]);
         l.CopyBufferRegion(&buffer, 0, args.0, args.1, len);
-        if let Some((c, at)) = count {
+        if let Some((c, at, state)) = count {
             let same = c.as_raw() == args.0.as_raw();
-            let state = if same { copy } else { arg_state };
+            let state = if same { copy } else { D3D12_RESOURCE_STATES(state as i32) };
             if !same {
-                l.ResourceBarrier(&[transition(c, state, copy)]);
+                l.ResourceBarrier(&[transition(c, state.0 as u32, copy.0 as u32)]);
             }
             l.CopyBufferRegion(&buffer, len, c, at, 4);
             if !same {
-                l.ResourceBarrier(&[transition(c, copy, state)]);
+                l.ResourceBarrier(&[transition(c, copy.0 as u32, state.0 as u32)]);
             }
         }
         l.ResourceBarrier(&[transition(args.0, copy, arg_state)]);
