@@ -1037,6 +1037,7 @@ impl Host {
                     ));
                     let list = p.pCommandList.as_ref().map(|l| l.as_raw());
                     let run = runs.iter().find(|r| Some(r.list.as_raw()) == list);
+                    #[cfg(feature = "diagnostics")]
                     let prelude = runs
                         .iter()
                         .find(|r| Some(r.prelude.1.as_raw()) == list);
