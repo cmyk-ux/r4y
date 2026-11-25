@@ -972,3 +972,14 @@ All changes are on `feature/wave64-host-target`, which updates PR #16. The PR re
   - `6b4c0b93d2c8322220e96c936721a4f495196c7e`: kept the no-completed-command fallback for prelude metadata inside the diagnostics feature gate.
 - Latest exact code commit at this note: `6b4c0b93d2c8322220e96c936721a4f495196c7e`.
 - CI run #198 for that exact code commit was queued when this note was written: https://github.com/cmyk-ux/r4y/actions/runs/45631278366. Do not claim success until completed.
+
+
+### Second CI failure and final build-configuration fix (2026-11-25)
+
+- CI #199 (run https://github.com/cmyk-ux/r4y/actions/runs/45631378191) reached Clippy and failed on exactly one warning promoted to an error: `prelude` was unused in the non-Diagnostics build because its only field reads were diagnostics-gated.
+- Final correction commits:
+  - `4d04c12dd343bc3e154701eba08d08330d7a9f50`: avoid allocating/formatting the depth-converter marker string unless `R4Y_D3D12_DRED` is actually enabled. This keeps the normal runtime path free of per-dispatch diagnostic formatting.
+  - `6676507ca41d825d665f036e900149999736cc5c`: gate the stopped-prelude binding to `feature = "diagnostics"`, matching all accesses to `prelude_notes`.
+- Exact current code head: `6676507ca41d825d665f036e900149999736cc5c`.
+- CI run #200 was observed in progress on this exact code head: https://github.com/cmyk-ux/r4y/actions/runs/45631759051
+- The prior Clippy issues are fixed in source, but the latest head is still **unvalidated** until CI completes. Check the new CI run before asking the user to pull/build or run the title.
