@@ -183,7 +183,7 @@ Validation, CI run #123 on commit `f82f97d`:
 Next actions:
 1. On the user's RTX 3070 checkout, run:
    ```powershell
-   cd C:\NVU\R4Y\r4y
+   cd C:\Users\dysu\Downloads\r4y\r4y
    git fetch origin feature/wave64-host-target
    git switch feature/wave64-host-target
    cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
