@@ -207,27 +207,23 @@ git rev-parse --short HEAD
 cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
 ```
 Expected HEAD: `24d1f7e` or a newer descendant.
-Latest RTX 3070 result after the MBCNT fixture correction (2026-11-25):
-- The corrected fixture is on the branch: `0x7E04_0301` now reads VGPR `v1`, not SGPR `s1`.
-- The user's latest hardware run passed:
-  - DPP/swizzle lane order for 32, 64 and 128 threads.
-  - DPP row masks for 64 and 128 threads.
-  - Wave64 VCC ballot/count cases for 64, 48 and 32 threads.
-  - Ordinary `v_mbcnt_lo_u32_b32` with the corrected fixture.
-  - Cross-half `v_readlane_b32`.
-- It then failed when translating the cross-half `v_writelane_b32` fixture:
-  `GFX10 code at 0x38: a descriptor's address or format read as data`.
-- The failing assertion is before dispatch (inside the test's `run -> translate` path), so the cross-half write kernel has not run on hardware yet. The error is surfaced at the later output buffer store; likely an earlier non-effect instruction was marked `Val::Missing(OTHER)`, but the source has not yet been identified. Do not assume the error is caused by the buffer store itself.
-- Commit `24d1f7e` adds a narrow diagnostic dump for this exact fixture: decoded instruction offsets/names/fields/SSA reads/writes and tracked scalar/descriptor provenance. Use that output to locate the first value marked missing.
-- CI #140 (`e92495c`) passed. CI #142 for the diagnostic commit `24d1f7e` is running. Neither hosted run substitutes for the RTX dispatch.
+Latest RTX 3070 diagnosis after the targeted IR dump (2026-11-25; user ran branch HEAD `c36a102`):
+- The test passed all assertions before the cross-half write fixture: in-half DPP/swizzle, row-mask behavior, ballot/count, corrected ordinary MBCNT, and cross-half `v_readlane`.
+- The decoded `v_writelane_b32` at offset `0x24` is structurally as intended: destination `v5`, scalar source `s9` (42), lane constant 40. This means the failure was not caused by malformed `v_writelane` operands.
+- The next instruction at offset `0x2c`, intended by the fixture comment to be `v_mov_b32 v2, v5`, actually decoded as `v_mov_b32 v2, s5`: IR reads show `(S(5), Value(11))`, not `(V(5), ...)`.
+- The resource trace identifies `s4:s7` as the output buffer descriptor loaded at `(block 0, offset 0x08)`. Therefore `s5` is a descriptor dword, not the lane-write result. The later buffer store at `0x38` surfaces the unsupported descriptor-as-number value; it is not the original bad instruction.
+- This is the same class of fixture encoding error as the earlier MBCNT copy: VOP1 source code `0x005` means SGPR `s5`, while VGPR `v5` requires source code `0x105`. The correct instruction is `0x7E04_0305`, not `0x7E04_0205`.
+- Commit `8d2fe8b` fixes the fixture to `0x7E04_0305` and removes the temporary one-off diagnostic prints. No production lowering change was made from this diagnosis.
+- Important: the cross-half write kernel has still **not** been dispatched on the RTX 3070. The failure was during translation of the malformed result-copy fixture, so real `v_writelane` behavior remains to be validated after this correction.
+- CI #143 (main) and #144 (PR branch HEAD `c36a102`) passed. CI #144 completed Clippy, build and all tests (212 passed, 0 failed, 2 ignored); its D3D12 hardware step explicitly skipped because the hosted runner supports neither 32- nor 64-lane waves. This is not a substitute for the user's RTX dispatch.
 
-On the user's checkout:
+On the user's checkout, pull the fix and rerun:
 ```powershell
 git pull --ff-only origin feature/wave64-host-target
 git rev-parse --short HEAD
 cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
 ```
-Expected HEAD: `24d1f7e` or a newer descendant. Send the block headed `[CROSS_HALF_WRITE decoded GFX10 IR]` and `[CROSS_HALF_WRITE tracked resources]` plus the final panic.
+Expected HEAD: `8d2fe8b` or a newer descendant. If this passes, send the full test result; if it fails, send the failing assertion and output. The temporary diagnostic blocks are no longer expected.
 
 ### 4.4 The failed hash extraction
 
