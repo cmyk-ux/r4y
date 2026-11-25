@@ -6369,7 +6369,7 @@ impl<'a> Lower<'a> {
                 // The first lane in EXEC across the whole 64-lane console wave.
                 let value = s(self, 0)?;
                 let word = |lower: &mut Self, code: u8| -> Result<V, Why> {
-                    match lower.get(inst.read(Reg::S(code).ok_or(LANE_MASK)?)?)? {
+                    match lower.get(inst.read(Reg::S(code)).ok_or(LANE_MASK)?)? {
                         Val::I32(value) => Ok(value),
                         _ => Err(LANE_MASK),
                     }
@@ -6383,7 +6383,7 @@ impl<'a> Lower<'a> {
                     32,
                     &[low],
                 );
-                let first_high = self.s.s.op(
+                let first_high = self.s.op(
                     c,
                     "unaryBits.i32",
                     Attr::ReadNone,
