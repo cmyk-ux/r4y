@@ -402,7 +402,7 @@ The root cause of the unresolved module was an earlier cleanup commit `b194221a9
 
 - `f8855c4190006040f36651d618af3a5ca5833675` — introduced a private `EmitOptions { target, allow_console_flow }` value, reducing `emit_for_with_console_flow` from 8 parameters to 7 without suppressing Clippy.
 - `f02181adf76067bb7262eadd18543f5a98289254` — qualified the test's module reference as `super::lower::CONSOLE_FLOW` and formatted the long match arm.
-- This handoff was subsequently committed as `7b15d19801a299fc16d1b067bcccbcce18374018`; it changes documentation only. Current remote feature-branch head is that documentation commit, with the source fix unchanged.
+- Subsequent handoff-only commits advance the branch without changing source. The source repair commit is `f02181adf76067bb7262eadd18543f5a98289254`; verify it is an ancestor of the local HEAD rather than relying on a documentation commit hash embedded here.
 - PR #16 remains open. At the time this note was written, the latest visible green branch CI was still on the older code head `a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa`; the repair commits themselves have not yet been confirmed green.
 - The GitHub compare still reports the feature branch as divergent from current `main` (102 ahead / 27 behind at the prior snapshot). Do not merge just to make CI run; keep validation on the PR branch and inspect any CI result tied to the exact head.
 
@@ -416,7 +416,7 @@ git status --short --branch
 git rev-parse HEAD
 ```
 
-The repair code is at `f02181adf76067bb7262eadd18543f5a98289254`; the branch then received this handoff-only update. Expected current HEAD: `7b15d19801a299fc16d1b067bcccbcce18374018`. If local HEAD differs, stop and inspect branch/status before testing.
+The repair code must be present in local history. Verify with `git merge-base --is-ancestor f02181adf76067bb7262eadd18543f5a98289254 HEAD` (exit code 0 means present). Documentation-only commits may move HEAD beyond the source repair. If this check fails, stop and inspect branch/status before testing.
 
 Then rerun:
 
