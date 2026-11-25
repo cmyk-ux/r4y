@@ -193,6 +193,7 @@ fn build(
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        target: super::Target::ANY,
     })
     .expect("lower");
     let shader = HostShader {
