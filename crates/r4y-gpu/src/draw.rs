@@ -550,6 +550,23 @@ impl State {
         }
         self.bind_heaps(list, memory_heap);
         if root_changed {
+            // Capture the exact state immediately before D3D12 validates the
+            // root-signature switch. This is gated by DRED diagnostics and
+            // rate-limited so it remains useful in long game runs.
+            if crate::host::dred_on() {
+                static ROOT_BINDS: AtomicU64 = AtomicU64::new(0);
+                if ROOT_BINDS.fetch_add(1, Ordering::Relaxed) < 24 {
+                    tracing::info!(
+                        target: "r4y_gpu::binding",
+                        pipeline = %p.name,
+                        compute,
+                        root,
+                        view_heap = self.host_heaps[0] as u64,
+                        sampler_heap = self.host_heaps[1] as u64,
+                        "translated root signature bind state"
+                    );
+                }
+            }
             // SAFETY: an open list and a live root signature; its heaps were
             // just rebound above.
             unsafe {
@@ -898,6 +915,25 @@ impl State {
                 heaps.push(Some(sampler_heap));
             }
             heaps.iter().flatten().for_each(|h| list.keep(h));
+            // DRED trace: record the concrete COM pointers passed to
+            // SetDescriptorHeaps, not only the cache keys above.
+            if crate::host::dred_on() {
+                static HEAP_BINDS: AtomicU64 = AtomicU64::new(0);
+                if HEAP_BINDS.fetch_add(1, Ordering::Relaxed) < 24 {
+                    let bound: Vec<u64> = heaps
+                        .iter()
+                        .flatten()
+                        .map(|heap| heap.as_raw() as usize as u64)
+                        .collect();
+                    tracing::info!(
+                        target: "r4y_gpu::binding",
+                        ?bound,
+                        wanted_view_heap = want[0] as u64,
+                        wanted_sampler_heap = want[1] as u64,
+                        "SetDescriptorHeaps binding"
+                    );
+                }
+            }
             // SAFETY: an open list and shader-visible heaps.
             unsafe { list.list.SetDescriptorHeaps(&heaps) };
             self.host_heaps = want;
