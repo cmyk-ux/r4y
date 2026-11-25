@@ -206,7 +206,29 @@ git pull --ff-only origin feature/wave64-host-target
 git rev-parse --short HEAD
 cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
 ```
-Expected HEAD: `e92495c` or a newer descendant.
+Expected HEAD: `24d1f7e` or a newer descendant.
+Latest RTX 3070 result after the MBCNT fixture correction (2026-11-25):
+- The corrected fixture is on the branch: `0x7E04_0301` now reads VGPR `v1`, not SGPR `s1`.
+- The user's latest hardware run passed:
+  - DPP/swizzle lane order for 32, 64 and 128 threads.
+  - DPP row masks for 64 and 128 threads.
+  - Wave64 VCC ballot/count cases for 64, 48 and 32 threads.
+  - Ordinary `v_mbcnt_lo_u32_b32` with the corrected fixture.
+  - Cross-half `v_readlane_b32`.
+- It then failed when translating the cross-half `v_writelane_b32` fixture:
+  `GFX10 code at 0x38: a descriptor's address or format read as data`.
+- The failing assertion is before dispatch (inside the test's `run -> translate` path), so the cross-half write kernel has not run on hardware yet. The error is surfaced at the later output buffer store; likely an earlier non-effect instruction was marked `Val::Missing(OTHER)`, but the source has not yet been identified. Do not assume the error is caused by the buffer store itself.
+- Commit `24d1f7e` adds a narrow diagnostic dump for this exact fixture: decoded instruction offsets/names/fields/SSA reads/writes and tracked scalar/descriptor provenance. Use that output to locate the first value marked missing.
+- CI #140 (`e92495c`) passed. CI #142 for the diagnostic commit `24d1f7e` is running. Neither hosted run substitutes for the RTX dispatch.
+
+On the user's checkout:
+```powershell
+git pull --ff-only origin feature/wave64-host-target
+git rev-parse --short HEAD
+cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
+```
+Expected HEAD: `24d1f7e` or a newer descendant. Send the block headed `[CROSS_HALF_WRITE decoded GFX10 IR]` and `[CROSS_HALF_WRITE tracked resources]` plus the final panic.
+
 ### 4.4 The failed hash extraction
 
 The user used:
