@@ -376,6 +376,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn indirect_count_keeps_compatible_shader_read_state() {
+        assert_eq!(
+            buffer_after(BUFFER_SHADER_RESOURCE, BUFFER_INDIRECT),
+            BUFFER_SHADER_RESOURCE | BUFFER_INDIRECT,
+        );
+        assert_eq!(
+            buffer_after(BUFFER_UAV, BUFFER_SHADER_RESOURCE),
+            BUFFER_SHADER_RESOURCE,
+        );
+    }
+
+    #[test]
     fn warp_adapter_accepts_only_software() {
         // This probes DXGI without creating a D3D12 device or running a title.
         // SAFETY: plain DXGI adapter queries.
