@@ -1449,22 +1449,6 @@ impl HostList {
         after
     }
 
-    /// Record the state left by an explicit barrier already emitted by a
-    /// specialized operation (the indirect-argument clamp).
-    pub(crate) fn set_buffer_state(
-        &self,
-        shadow: &std::sync::Arc<crate::shadow::Shadow>,
-        state: u32,
-    ) {
-        self.buffers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                std::sync::Arc::as_ptr(shadow) as usize,
-                (state, shadow.clone()),
-            );
-    }
-
     /// Add a use made by a descriptor/root binding. Uses of the same buffer
     /// are coalesced before barriers are recorded.
     pub(crate) fn want_buffer(
