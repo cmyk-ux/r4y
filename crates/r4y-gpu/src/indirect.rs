@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use windows::core::s;
 
-use crate::host::{BUFFER_INDIRECT, BUFFER_UAV, HostList, host, transition};
+use crate::host::{HostList, host};
 use crate::shadow::Shadow;
 
 const SOURCE: &str = r#"
@@ -273,11 +273,11 @@ fn uav_barrier() -> D3D12_RESOURCE_BARRIER {
 mod tests {
     /// The clamp compiles with the system's compiler and the host takes it.
     #[test]
-    fn argument_clamp_builds() {
-        if super::host().is_none() {
-            return; // no host GPU here
-        }
-        assert!(super::clamp().is_some());
+    fn argument_clamp_builds_on_warp() {
+        let Some(host) = crate::host::Host::new_warp() else {
+            return; // WARP is not available on this Windows installation.
+        };
+        assert!(super::make_for(&host.device).is_ok());
     }
 
     #[test]
@@ -286,6 +286,8 @@ mod tests {
         assert!(super::SOURCE.contains("if (id.x >= active) return"));
         assert!(super::SOURCE.contains("ByteAddressBuffer args : register(t0)"));
         assert!(super::SOURCE.contains("RWByteAddressBuffer dst_args : register(u0)"));
+        assert!(!super::SOURCE.contains("args.Store"));
+        assert!(super::SOURCE.contains("dst_args.Store"));
     }
 
     #[test]
