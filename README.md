@@ -1,43 +1,51 @@
 <img width="1122" height="634" alt="R4Y BOOTSTRAP" src="https://github.com/user-attachments/assets/411698af-0b0a-40cd-b0a9-b13911317a3d" />
+
 # R4Y — Recomp4You
 
-R4Y is an experimental Windows compatibility engine for running Xbox Series X|S title builds from game files that users already own and can read on disk.
+**An experimental Xbox Series X|S (Scarlett/GDK) compatibility layer for Windows, written in Rust.**
 
-R4Y is maintained as a single, self-contained Rust workspace. The loader, console API layer, D3D12 backend, shader translator, format handling, command-line tools, tests and Windows installer are developed together. Installation does not download or select a separate runtime.
+R4Y runs user-provided x64 title executables on the Windows CPU and recreates selected console services and graphics interfaces on the host. It combines a PE32+ loader, a high-level emulation (HLE) layer for console APIs, a D3D12 backend, and an RDNA2/GFX10 shader translator that emits DXIL for Windows D3D12.
 
-## Project approach
+R4Y is a compatibility runtime, not a full hardware emulator. The goal is to execute native title code while implementing or adapting the platform interfaces it expects—not to simulate an entire console.
 
-R4Y has its own workspace structure, runtime integration and implementation decisions. Development is guided by reproducible bug reports, public technical discussions, targeted experiments and regression tests. Relevant findings are evaluated for the R4Y architecture, adapted locally and tested where a reproducible test is available; external workarounds are not assumed to apply automatically.
+> **Status: experimental.** API coverage, file formats, graphics features and shader patterns are incomplete. Compatibility and performance vary by title build, scene, Windows version, GPU and driver. R4Y is an active research project, not a production-ready or turnkey gaming application.
 
-Keyboard input is handled through R4Y's integrated input path. Its current behavior follows a familiar console-compatibility model while remaining part of the R4Y runtime.
+## Runtime at a glance
 
-> **Status: experimental.** Boot, menus and portions of the rendering path are under active development. Compatibility, stability and performance vary by title build, hardware and driver. The figures below are early observations from the current local test configuration, not universal benchmarks or performance guarantees.
+| Component | What it does | Status |
+|---|---|---|
+| PE32+ loader | Maps x64 images, applies relocations, resolves IAT imports and sets up TLS | Experimental |
+| Console API HLE | Implements selected KernelX, XGameRuntime, XMem, storage, media and DirectStorage interfaces | Partial |
+| D3D12_XS backend | Adapts console graphics objects, resources, descriptors and command lists to host D3D12 | Experimental |
+| Shader translation | Decodes GFX10/RDNA2 shader programs and emits DXIL for host pipelines | Partial |
+| Formats | Handles selected texture tiling/swizzle layouts, BCPack data and XMA2 audio | Partial |
 
-## Current performance observations
+Unsupported imports and shader patterns are not silently assumed to work. Host pass-through is controlled by policy, and unimplemented imports can be configured to trap or use the runtime's explicit fallback behavior.
 
-| Runtime area | Observed average |
-|---|---:|
-| Gameplay | approximately **5 FPS** |
-| In-game menu | approximately **30 FPS** |
-
-These results are configuration-specific and should be treated as an early baseline. Actual performance depends on hardware, graphics drivers, title build, scene complexity and runtime configuration.
-
-R4Y does not distribute game files, keys, executables, shaders, saves or other copyrighted game assets. It does not decrypt files or bypass platform protection. Users must provide their own legally obtained files, already readable on disk.
-
-## Repository layout
+## Project layout
 
 | Area | Location | Purpose |
 |---|---|---|
-| User-facing executable | `apps/r4y` | R4Y CLI: inspect, census, shader tools, configuration and run |
-| PE loader | `crates/r4y-loader`, `crates/r4y-pe` | Map and bind the title executable and title DLLs |
-| Console runtime | `crates/r4y-hle` | Xbox API/HLE implementations and host pass-through |
-| D3D12 backend | `crates/r4y-gpu` | Resource copies, descriptors, command lists and host GPU execution |
-| Shader translator | `crates/r4y-shader` | RDNA2 decoding and DXIL emission |
-| Formats and title data | `crates/r4y-formats`, `crates/r4y-game` | Texture/audio/archive formats and title-specific pipeline metadata |
-| Cache and configuration | `crates/r4y-pipeline`, `crates/r4y-core` | Content-addressed cache, logs, paths and runtime policy |
-| Repository tools | `xtask`, `tests` | Asset policy, hooks and tests |
+| User-facing executable | `apps/r4y` | CLI for inspection, import census, shader tools, configuration and execution |
+| PE loader | `crates/r4y-loader`, `crates/r4y-pe` | PE32+ image mapping, imports, relocations and TLS |
+| Console runtime | `crates/r4y-hle` | KernelX, XGameRuntime and other HLE implementations |
+| D3D12 backend | `crates/r4y-gpu` | D3D12_XS objects, GPU memory, descriptors, command lists and host D3D12 |
+| Shader translator | `crates/r4y-shader` | GFX10/RDNA2 decoding, shader structure and DXIL emission |
+| Formats and title metadata | `crates/r4y-formats`, `crates/r4y-game` | Texture/audio formats, title build identities and pipeline metadata |
+| Cache and configuration | `crates/r4y-pipeline`, `crates/r4y-core` | Content-addressed caches, paths, logs and runtime policy |
+| Repository tools | `xtask`, `tests` | Asset-policy enforcement, hooks and regression tests |
 
-The public application, internal crates, configuration, launchers and user-data directories use the **R4Y** identity.
+The project is maintained as one Rust workspace and one integrated runtime. Installation does not download, clone or select a separate backend.
+
+## Requirements
+
+For a local Windows build:
+
+- Windows 10/11 x64 and a CPU with AVX2.
+- Rustup using the toolchain pinned in `rust-toolchain.toml`.
+- Visual Studio 2022 C++ Build Tools and a Windows SDK.
+- A D3D12 adapter. Shader Model 6.6, mesh-shader and wave-operation support are required for the corresponding graphics paths; support varies by GPU and driver.
+- DXC 1.8 or newer is recommended for offline shader validation and development.
 
 ## Quick start
 
@@ -54,66 +62,54 @@ The public application, internal crates, configuration, launchers and user-data 
    r4y.cmd
    ```
 
-3. The installer checks Windows, Rust and MSVC prerequisites, lets you select your game folder and executable, writes local configuration under `%LOCALAPPDATA%\R4Y`, builds `r4y.exe` and validates the selected executable.
+3. Follow the prompts to select your game folder and executable. The installer checks prerequisites, writes local configuration under `%LOCALAPPDATA%\R4Y`, builds `r4y.exe` and validates the selected executable.
 
-4. Start the configured title with `r4y-run.cmd`. The game directory is not modified.
+4. Start the configured title:
 
-The first Rust build downloads dependencies and compiles the workspace. Later builds reuse Cargo's target directory and the runtime's shader and pipeline caches.
+   ```cmd
+   r4y-run.cmd
+   ```
 
-## Installer options
+The game directory is not modified by the installer. The first Rust build downloads dependencies and compiles the workspace; later builds reuse Cargo's target directory and R4Y's shader and pipeline caches.
 
-```text
-r4y.cmd [--dry-run] [--no-build] [--no-run] [--yes] [--test] [--diagnostics] [--help]
+### Installer options
 
-  --dry-run      Check prerequisites without installing or writing setup files
-  --no-build     Save local game/config selection but skip compilation
-  --no-run       Build and validate without offering to launch the game
-  --yes          Accept the installer's prerequisite-installation prompts
-  --test         Run cargo test --workspace --locked before building
-  --diagnostics  Build the diagnostics profile instead of the normal release profile
-  --check-msvc   Validate the Visual C++ build environment without installing
-  --help         Show the available options
-```
+Run `r4y.cmd --help` for the current help text.
 
-These options control the single R4Y workspace. No additional runtime is downloaded or selected.
-
-## Manual build
-
-Requirements: Windows 10/11 x64, a CPU with AVX2, the Rust toolchain pinned by `rust-toolchain.toml`, Visual Studio C++ Build Tools and a Windows SDK. A D3D12 adapter with Shader Model 6.6 and the required mesh/wave features is needed for the relevant rendering paths. DXC 1.8+ is recommended for offline shader translation and validation.
-
-```powershell
-rustup toolchain install
-cargo xtask policy
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo build --release --locked -p r4y
-```
-
-The executable is `target\release\r4y.exe`.
-
-For a diagnostics build:
-
-```powershell
-cargo build --profile diag --locked -p r4y --features diagnostics
-```
+| Option | Behavior |
+|---|---|
+| `--dry-run` | Check prerequisites without installing or writing setup files |
+| `--no-build` | Save local game/config selection but skip compilation |
+| `--no-run` | Build and validate without offering to launch |
+| `--yes` | Accept prerequisite-installation prompts |
+| `--test` | Run `cargo test --workspace --locked` before building |
+| `--diagnostics` | Build the diagnostics profile instead of the normal release profile |
+| `--launch` | Launch the last configured title without running setup |
+| `--check-msvc` | Validate the Visual C++ build environment and exit |
+| `--test-native-output` | Maintainer check for native stderr handling in Windows PowerShell 5.1 |
 
 ## CLI
 
-```powershell
-# Inspect a PE image
-target\release\r4y.exe inspect .\path\to\game.exe
+The executable is `target\release\r4y.exe`.
 
-# Translate and validate shaders from user-supplied files
+```powershell
+# Inspect a PE image and its imports
+target\release\r4y.exe inspect .\path\to\title.exe --imports
+
+# Summarize imported APIs and runtime coverage
+target\release\r4y.exe census --missing
+
+# Translate shader containers and validate emitted DXIL
 target\release\r4y.exe translate .\path\to\shader-data --validate --list
 
 # Show resolved paths and configuration
 target\release\r4y.exe config
 
-# Start the title
-target\release\r4y.exe run .\path\to\game.exe --execute
+# Prepare and bind a title; --execute starts it
+target\release\r4y.exe run .\path\to\title.exe --execute
 ```
 
-The installer creates `%LOCALAPPDATA%\R4Y\r4y.toml` automatically. For a manual setup, create that file with a minimal configuration such as:
+The installer creates `%LOCALAPPDATA%\R4Y\r4y.toml`. For a manual setup, create that file with a minimal configuration:
 
 ```toml
 [paths]
@@ -122,22 +118,46 @@ game_dir = 'D:\R4Y-data\game'
 # data_dir = 'D:\R4Y-data\data'
 ```
 
-`R4Y_CONFIG` selects an alternate configuration file.
+Set `R4Y_CONFIG` to use an alternate configuration file.
+
+## Build and test
+
+```powershell
+rustup toolchain install
+cargo xtask policy
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo build --release --locked -p r4y
+```
+
+The executable is written to `target\release\r4y.exe`.
+
+For the diagnostics profile:
+
+```powershell
+cargo build --profile diag --locked -p r4y --features diagnostics
+```
 
 ## Diagnostics
 
-The public environment variables use the `R4Y_` prefix.
+The public environment variables use the `R4Y_` prefix. A diagnostics build is required for the D3D12 debug layer, GPU-based validation and DRED.
 
-```cmd
-set R4Y_LOG=info
-set R4Y_D3D12_DEBUG=1
-set R4Y_D3D12_DRED=1
+```powershell
+$env:R4Y_LOG = 'info'
+$env:R4Y_D3D12_DEBUG = '1'
+$env:R4Y_D3D12_DRED = '1'
+$env:R4Y_D3D12_GBV = '1'
 r4y-run.cmd
 ```
 
-A diagnostics build is required for the D3D12 debug layer, DRED and debug-only switches. The installer does not enable these in a normal release build. Diagnostic output and runtime data are stored outside the repository under `%LOCALAPPDATA%\R4Y`.
+Useful switches include `R4Y_GPU_TIMING=1` for GPU timings and `R4Y_D3D12_WARP=1` for the software adapter in diagnostics builds. Diagnostic output and runtime data are stored outside the repository under `%LOCALAPPDATA%\R4Y`.
 
-R4Y probes the device's shader-visible view-heap limit before translating shaders. On drivers that reject the console-sized heap, the capped fallback keeps separate ranges for mirrored title descriptors, transient descriptors, long-lived descriptor pairs and null sentinels. Title indices beyond the mirrored prefix resolve to null instead of aliasing R4Y's transient descriptors. **This is a safety fallback, not complete descriptor virtualization:** high title descriptors are not preserved yet, and scenes that need them may be incomplete. See [issue #4](https://github.com/cmyk-ux/r4y/issues/4).
+## Known limitations
+
+Some drivers reject the console-sized shader-visible descriptor heap. In that case R4Y uses a capped fallback with separate regions for mirrored title descriptors, transient allocations, persistent descriptor pairs and null sentinels. This avoids aliasing transient allocations, but **it is not complete descriptor virtualization**: title indices beyond the mirrored prefix are not preserved yet and may resolve to null. See [issue #4](https://github.com/cmyk-ux/r4y/issues/4).
+
+Shader and API coverage is also partial. A successful build does not imply that a particular title, scene or GPU path is fully compatible.
 
 ## Development documentation
 
@@ -149,3 +169,5 @@ R4Y probes the device's shader-visible view-heap limit before translating shader
 ## License and notices
 
 R4Y is distributed under GPL-3.0-or-later. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md) for license information and required source attributions.
+
+R4Y does not distribute game files, keys, executables, generated shaders, saves or other copyrighted game assets. It does not decrypt files or bypass platform protection. Users must supply files they are legally entitled to use, already readable on disk.
