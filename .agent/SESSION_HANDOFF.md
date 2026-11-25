@@ -489,3 +489,13 @@ A prototype lowering change was committed:
 ### State at the time of this handoff update
 
 The most recent source/CI configuration commit is `1c7cc18f45e4f8b02433b4df92ff271fbbd0bbf`. The PR head must be queried again after this edit because this handoff update itself creates another commit and triggers another PR workflow. **No green CI result for the structured-buffer prototype is claimed here.** The next assistant session must check the latest branch head and its associated Actions run before asking the user to test or continuing to the game A/B.
+
+
+#### CI trigger attempt and integration limitation (same session)
+
+- After the commits above, the feature branch tip was `d7c2f5bfe25e4874336f0853e7db40a889b6b31c`. The PR #16 head matched it.
+- GitHub returned `total_count: 0` for `/commits/d7c2f5b.../check-runs` and `/actions/runs?head_sha=d7c2f5b...`; combined status was pending with no statuses. The most recent Actions runs remained on old commits (the newest was a `main` push, not this feature revision).
+- A temporary validation PR #17 was created from exactly this same commit, marked ready, closed and reopened to generate PR activity. It still did not create an Actions run and was then closed. It must never be merged. Temporary branch: `ci/validate-wave64-head-20261125`.
+- The GitHub connection available in this session exposes GET-only workflow-run inspection and rerun actions for jobs that already exist; it exposes no new-run/workflow-dispatch action. Writes to the repository and the PR mutations above did not produce an Actions run in this environment. The workflow now declares `workflow_dispatch`, but this connection cannot send the required dispatch request.
+- **Therefore the exact feature head is not CI-validated.** Do not label the prototype green. The blocker is the inability of the connected GitHub action surface to dispatch a new run (not a user-side build failure). Once an authorized workflow-dispatch capability is available, run the updated CI on the current branch head and inspect every job/log. If a real run appears automatically, use that instead.
+- This does not relax the CI ownership rule above: the assistant must use a dispatch-capable integration when available, or report the concrete capability blocker; never ask the user to substitute for CI when the workflow can be run remotely.
