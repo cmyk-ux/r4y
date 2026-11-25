@@ -73,44 +73,45 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (has_count != 0) active = min(active, count_buf.Load(count_offset));
     if (id.x >= active) return;
 
-    uint at = args_offset + id.x * stride;
+    uint src_at = args_offset + id.x * stride;
+    uint dst_at = id.x * stride;
     uint cost;
     if (kind <= 1) {
         // Draws: vertex or index count, then instances.
-        uint count = min(args.Load(at), 1u << 24);
-        uint instances = min(args.Load(at + 4), (1u << 26) / max(count, 1u));
+        uint count = min(args.Load(src_at), 1u << 24);
+        uint instances = min(args.Load(src_at + 4), (1u << 26) / max(count, 1u));
         cost = count * instances;
         for (uint off = 8; off < stride; off += 4) {
-            dst_args.Store(at + off, args.Load(at + off));
+            dst_args.Store(dst_at + off, args.Load(src_at + off));
         }
         bool over = charge_budget(cost);
         if (over) {
             count = 0;
             instances = 0;
         }
-        dst_args.Store2(at, uint2(count, instances));
+        dst_args.Store2(dst_at, uint2(count, instances));
     } else if (kind == 2) {
-        uint3 g = min(args.Load3(at), uint3(65535u, 65535u, 65535u));
+        uint3 g = min(args.Load3(src_at), uint3(65535u, 65535u, 65535u));
         // x * y fits 32 bits; the whole count may not.
         if (g.z != 0 && g.x * g.y > GROUPS / g.z) {
             g = uint3(0, 0, 0);
         }
         cost = g.x * g.y * g.z * 64u;
         for (uint off = 12; off < stride; off += 4) {
-            dst_args.Store(at + off, args.Load(at + off));
+            dst_args.Store(dst_at + off, args.Load(src_at + off));
         }
         if (charge_budget(cost)) g = uint3(0, 0, 0);
-        dst_args.Store3(at, g);
+        dst_args.Store3(dst_at, g);
     } else {
         // Mesh dispatches: the console's are one-dimensional.
-        uint3 g = args.Load3(at);
+        uint3 g = args.Load3(src_at);
         g = uint3(min(g.x, 65535u), min(g.y, 1u), min(g.z, 1u));
         cost = g.x * g.y * g.z * 128u;
         for (uint off = 12; off < stride; off += 4) {
-            dst_args.Store(at + off, args.Load(at + off));
+            dst_args.Store(dst_at + off, args.Load(src_at + off));
         }
         if (charge_budget(cost)) g = uint3(0, 0, 0);
-        dst_args.Store3(at, g);
+        dst_args.Store3(dst_at, g);
     }
 }
 "#;
@@ -402,7 +403,8 @@ mod tests {
         assert!(super::SOURCE.contains("ByteAddressBuffer args : register(t0)"));
         assert!(super::SOURCE.contains("RWByteAddressBuffer dst_args : register(u0)"));
         assert!(super::SOURCE.contains("uint args_offset;"));
-        assert!(super::SOURCE.contains("args_offset + id.x * stride"));
+        assert!(super::SOURCE.contains("src_at = args_offset + id.x * stride"));
+        assert!(super::SOURCE.contains("dst_at = id.x * stride"));
         assert!(super::SOURCE.contains("count_buf.Load(count_offset)"));
         assert!(
             !super::SOURCE
@@ -455,18 +457,23 @@ mod tests {
         let host = crate::host::host()
             .expect("the Windows CI test environment must provide D3D12 WARP");
         let bytes = 3 * 16u64;
+        const INPUT_OFFSET: usize = 4;
         const SENTINEL: u32 = 0xDEAD_BEEF;
         let source_words = [
             0x11u32, 0x2, 0x3, 0x4,
             0x20, 0x30, 0x40, 0x50,
             0x60, 0x70, 0x80, 0x90,
         ];
-        let (source, source_data) = host.shared_buffer(bytes).unwrap();
+        let (source, source_data) = host.shared_buffer(bytes + INPUT_OFFSET as u64).unwrap();
         let (count, count_data) = host.shared_buffer(256).unwrap();
         // SAFETY: these are the mapped pointers returned by shared_buffer.
         unsafe {
-            std::ptr::copy_nonoverlapping(source_words.as_ptr(), source_data.cast(), source_words.len());
-            count_data.cast::<u32>().write(1);
+            std::ptr::copy_nonoverlapping(
+                source_words.as_ptr(),
+                source_data.add(INPUT_OFFSET).cast(),
+                source_words.len(),
+            );
+            count_data.add(INPUT_OFFSET).cast::<u32>().write(1);
         }
         let (upload, upload_data) = host.upload_buffer(bytes).unwrap();
         // SAFETY: upload_data is the mapped upload buffer returned above.
@@ -549,9 +556,9 @@ mod tests {
             budget_gpu,
             super::Inputs {
                 args: source_gpu,
-                args_offset: 0,
+                args_offset: INPUT_OFFSET as u32,
                 count: Some(count_gpu),
-                count_offset: 0,
+                count_offset: INPUT_OFFSET as u32,
             },
             (0, 16, 3),
         ));
@@ -600,9 +607,12 @@ mod tests {
             assert_eq!(&result[..4], &[0x11, 0x2, 0x3, 0x4]);
             assert_eq!(&result[4..], &[SENTINEL; 8]);
             readback.Unmap(0, None);
-            let original = std::slice::from_raw_parts(source_data.cast::<u32>(), source_words.len());
+            let original = std::slice::from_raw_parts(
+                source_data.add(INPUT_OFFSET).cast::<u32>(),
+                source_words.len(),
+            );
             assert_eq!(original, &source_words, "the clamp must not modify the title's input buffer");
-            assert_eq!(count_data.cast::<u32>().read(), 1);
+            assert_eq!(count_data.add(INPUT_OFFSET).cast::<u32>().read(), 1);
         }
     }
 }
