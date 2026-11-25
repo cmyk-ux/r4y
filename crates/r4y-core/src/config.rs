@@ -195,8 +195,8 @@ mod tests {
     }
 
     #[test]
-    fn example_config_parses() {
-        let text = include_str!("../../../r4y.example.toml");
+    fn minimal_config_parses() {
+        let text = "[paths]\ngame_dir = 'D:\\R4Y-data\\game'\n";
         let parsed: FileConfig = toml::from_str(text).unwrap();
         assert!(parsed.paths.game_dir.is_some());
     }

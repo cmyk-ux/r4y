@@ -70,6 +70,7 @@ r4y.cmd [--dry-run] [--no-build] [--no-run] [--yes] [--test] [--diagnostics] [--
   --yes          Accept the installer's prerequisite-installation prompts
   --test         Run cargo test --workspace --locked before building
   --diagnostics  Build the diagnostics profile instead of the normal release profile
+  --check-msvc   Validate the Visual C++ build environment without installing
   --help         Show the available options
 ```
 
@@ -111,7 +112,16 @@ target\release\r4y.exe config
 target\release\r4y.exe run .\path\to\game.exe --execute
 ```
 
-Copy [`r4y.example.toml`](r4y.example.toml) to `%LOCALAPPDATA%\R4Y\r4y.toml` or let the installer generate it. `R4Y_CONFIG` selects the configuration file.
+The installer creates `%LOCALAPPDATA%\R4Y\r4y.toml` automatically. For a manual setup, create that file with a minimal configuration such as:
+
+```toml
+[paths]
+game_dir = 'D:\R4Y-data\game'
+# cache_dir = 'D:\R4Y-data\cache'
+# data_dir = 'D:\R4Y-data\data'
+```
+
+`R4Y_CONFIG` selects an alternate configuration file.
 
 ## Diagnostics
 
@@ -129,8 +139,6 @@ A diagnostics build is required for the D3D12 debug layer, DRED and debug-only s
 ## Development documentation
 
 - [Architecture and runtime flow](docs/architecture.md)
-- [Internal source map](docs/SOURCE_MAP.md)
-- [Integration and testing boundaries](docs/INTEGRATION.md)
 - [Asset and test-data policy](docs/asset-policy.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
