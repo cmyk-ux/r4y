@@ -6,7 +6,7 @@
 >
 > **Visibility:** this file is committed to the repository. It is not private or access-controlled; anyone with repository access can read it.
 
-Last updated: 2026-11-25 (America/Sao_Paulo); RTX 3070 MBCNT classification correction committed; hardware rerun pending
+Last updated: 2026-11-25 (America/Sao_Paulo); installer duplicate-tail fix committed to main and PR #16; CI #165 passed (hosted Wave64 step skipped)
 Repository: https://github.com/cmyk-ux/r4y
 Primary checkout used by the user: `C:\Users\dysu\Downloads\r4y\r4y`
 Current investigation: GTA VI runtime on NVIDIA GeForce RTX 3070 / D3D12.
@@ -341,7 +341,8 @@ The user resumed from the "Corrigir teste DPP" session and asked to continue wit
 
 ### Verification after fix
 
-- PR CI #165, run `45583509798`, for PR head `a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa`: at the last check, installer PowerShell parse + read-only dry-run passed, MSVC environment initialization passed, Windows PowerShell 5.1 native-stderr probe passed, Rust toolchain install and cache setup passed; normal Clippy was running. Build/tests had not yet been reached.
+- PR CI #165, run `45583509798`, for PR head `a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa`: **completed successfully**. Installer PowerShell parse + read-only dry-run, MSVC initialization, Windows PowerShell 5.1 stderr probe, Rust toolchain/cache, normal and all-features Clippy, release build, and workspace tests all passed. Workspace tests: **212 passed, 0 failed, 2 ignored, 3 filtered out**.
+- The dedicated D3D12 Wave64 step also completed successfully, but its output explicitly said `adapter supports neither 32- nor 64-lane waves; skipped`. This is a successful hosted-runner skip, not a hardware dispatch. The earlier RTX 3070 local dispatch validation remains the hardware evidence.
 - Run link: https://github.com/cmyk-ux/r4y/actions/runs/45583509798
 - Main fix commit link: https://github.com/cmyk-ux/r4y/commit/128e3d135799304390676a8667247088e900675d
 - PR branch fix commit link: https://github.com/cmyk-ux/r4y/commit/a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa
