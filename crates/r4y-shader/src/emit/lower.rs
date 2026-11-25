@@ -4233,9 +4233,12 @@ impl<'a> Lower<'a> {
     }
 
     fn scc_in(&mut self, inst: &Inst) -> Result<V, Why> {
-        let v = inst.read(Reg::Scc).ok_or("an unread SCC")?;
-        match self.get(v)? {
-            Val::Bit(x) => Ok(x),
+        let value = inst.read(Reg::Scc).ok_or("an unread SCC")?;
+        if self.console_cf {
+            return self.scc_bit(value);
+        }
+        match self.get(value)? {
+            Val::Bit(bit) => Ok(bit),
             _ => Err("SCC without a value"),
         }
     }
