@@ -347,8 +347,8 @@ The disabled run may lose rendering/features because those shaders are intention
 
 ### CI status at this handoff
 
-- Latest source-code commit in this audit: `b194221a932443984d05b24752aba195bb7b7570`; subsequent handoff/watchlist documentation commits advanced the branch head to `a1634486d1e39840310299b260eecd491c9f02a1`.
-- No Actions run was associated with `a163448` when rechecked; the latest green run remains #165 on the older code head `a24552a`.
+- Latest source-code commit in this audit: `b194221a932443984d05b24752aba195bb7b7570`; the handoff and reference-watchlist documentation were committed afterward on the same feature branch. Re-read the actual branch head at the start of the next session.
+- No Actions run was associated with the audited documentation updates when rechecked; the latest green run remains #165 on the older code head `a24552a`.
 - PR [#16](https://github.com/cmyk-ux/r4y/pull/16) remains open.
 - The latest green CI run observed was #165 on the previous code head `a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa`, not the code changes above. No successful CI result for `b194221` was confirmed. Do not say these commits are tested until the exact current head has green CI and the runtime A/B is complete.
 
