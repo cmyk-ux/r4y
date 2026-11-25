@@ -487,7 +487,24 @@ pub fn emit_for(
     res: &resource::Resources,
     target: Target,
 ) -> Result<HostShader, ShaderError> {
-    emit_for_with_console_flow(c, native, p, st, io, res, target, wave64_console_flow())
+    emit_for_with_console_flow(
+        c,
+        native,
+        p,
+        st,
+        io,
+        res,
+        EmitOptions {
+            target,
+            allow_console_flow: wave64_console_flow(),
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct EmitOptions {
+    target: Target,
+    allow_console_flow: bool,
 }
 
 fn emit_for_with_console_flow(
@@ -497,8 +514,7 @@ fn emit_for_with_console_flow(
     st: &structure::Structured,
     io: &io::Io,
     res: &resource::Resources,
-    target: Target,
-    allow_console_flow: bool,
+    options: EmitOptions,
 ) -> Result<HostShader, ShaderError> {
     let sig = |fourcc| -> Result<Vec<container::SigElement>, ShaderError> {
         match c.part(fourcc) {
@@ -565,12 +581,12 @@ fn emit_for_with_console_flow(
         outputs: outputs.clone(),
         prims: prims.clone(),
         mesh_stride,
-        target,
+        target: options.target,
         console_cf,
     };
     let first = lower::lower(&parts(st, res, false));
     let l = match first {
-        Err(ShaderError::Unsupported { what: lower::CONSOLE_FLOW, .. }) if allow_console_flow => {
+        Err(ShaderError::Unsupported { what: lower::CONSOLE_FLOW, .. }) if options.allow_console_flow => {
             // Re-structure as the console does: all lanes follow the same
             // block sequence, while EXEC is retained as each instruction's
             // vector guard. Only the bounded one-wave/no-LDS subset is sent
@@ -1334,7 +1350,7 @@ mod tests {
 
 #[cfg(test)]
 mod host_wave_target_tests {
-    use super::{Container, Target, emit_for_with_console_flow};
+    use super::{Container, Target, emit_for_with_console_flow, lower};
     use crate::native::{ComputeIo, HwStage, NativeProgram, StageIo};
     use crate::{ShaderError, io, ir, resource, structure};
 
@@ -1360,8 +1376,10 @@ mod host_wave_target_tests {
             &st,
             &raised,
             &resources,
-            target,
-            allow_console_flow,
+            super::EmitOptions {
+                target,
+                allow_console_flow,
+            },
         )
     }
 
