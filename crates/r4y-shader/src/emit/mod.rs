@@ -1348,6 +1348,24 @@ mod host_wave_target_tests {
             })
         ));
 
+        // Read-first-lane is whole-wave too, even in a shader with no
+        // DPP/swizzle instructions to trigger the in-half split logic.
+        let wave64_read_first = compute(
+            &[
+                0x7E12_0500, // v_readfirstlane_b32 s9, v0
+                0x7E04_0209, // v_mov_b32 v2, s9
+                0xBF81_0000,
+            ],
+            true,
+        );
+        assert!(matches!(
+            translate(&wave64_read_first, nvidia),
+            Err(ShaderError::Unsupported {
+                what: "console wave64 lanes on a host without 64-lane waves",
+                ..
+            })
+        ));
+
         // A wave64 program which does not depend on lane layout does not
         // declare WaveSize(64) and remains usable on a 32-lane host.
         let scalar_wave64 = compute(&[0x7E02_0300, 0xBF81_0000], true);
