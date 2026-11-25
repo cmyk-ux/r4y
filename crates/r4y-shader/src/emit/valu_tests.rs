@@ -185,11 +185,13 @@ fn run_cases(
 ) {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut ran = 0;
+    let mut available = 0;
     for (label, warp) in [("hardware", false), ("warp", true)] {
         let Ok(host) = Host::new(warp) else {
             eprintln!("no SM 6.6 {label} device; skipped");
             continue;
         };
+        available += 1;
         if let Some(reason) = host.shader_wave_limit(&shader.dxil) {
             eprintln!("{label}: {reason}; hardware probe skipped");
             continue;
@@ -221,6 +223,10 @@ fn run_cases(
             check(label, i, inputs, out[0][0]);
         }
         ran += 1;
+    }
+    if available > 0 && ran == 0 {
+        eprintln!("all SM 6.6 adapters skipped this probe because its fixed WaveSize is unsupported");
+        return;
     }
     assert!(ran > 0, "neither hardware nor WARP SM 6.6 device available");
 }
