@@ -184,10 +184,10 @@ fn watch(base: usize, size: usize) {
 }
 
 /// Debugging aid: `R4Y_POKE=<rva>:<byte>,...` (hex) writes the byte at
-/// each title+rva twice a second. A title that ends itself when its main
-/// loop has not ticked for a while (Grand Theft Auto VI: 30 s) runs on
-/// through slower frames with its tick flag poked. The address must be
-/// writable title data.
+/// each title+rva twice a second. Some title builds terminate when a
+/// watchdog sees no main-loop tick for a configured interval; this diagnostic
+/// can keep a test run alive by poking that title's writable tick flag. The
+/// address must be writable title data.
 #[cfg(all(windows, feature = "diagnostics"))]
 fn poke(base: usize, size: usize) {
     let Ok(list) = std::env::var("R4Y_POKE") else {
@@ -218,7 +218,7 @@ fn title_dll(host: &r4y_hle::HostPolicy, dll: &str) -> bool {
 }
 
 /// Title DLLs the title loads itself (`LoadLibrary`) that nothing imports,
-/// e.g. Grand Theft Auto VI's upscaler behind its FidelityFX loader.
+/// e.g. an upscaler loaded behind a FidelityFX loader.
 #[cfg(windows)]
 struct LateDlls {
     host: r4y_hle::HostPolicy,
