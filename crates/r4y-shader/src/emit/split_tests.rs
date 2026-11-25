@@ -165,9 +165,26 @@ fn translate(native: &NativeProgram, target: Target) -> Result<super::HostShader
     let container = Container::parse(&bytes).map_err(|e| e.to_string())?;
     let p = ir::build(&native.patched_code(), native.wave64, native.vgprs)
         .map_err(|e| e.to_string())?;
+    let debug_writelane = native.code == program(CROSS_HALF_WRITE, 64).code;
+    if debug_writelane {
+        eprintln!("\\n[CROSS_HALF_WRITE decoded GFX10 IR]");
+        for (b, block) in p.blocks.iter().enumerate() {
+            for inst in &block.insts {
+                eprintln!(
+                    "block={b} offset={:#04x} {} fields={:?} reads={:?} writes={:?}",
+                    inst.machine.offset, inst.name(), inst.fields, inst.reads, inst.writes
+                );
+            }
+        }
+    }
     let st = structure::structure(&p).map_err(|e| e.to_string())?;
     let resources = resource::track(&p, &native.layout, native.stage, Some(&st))
         .map_err(|e| e.to_string())?;
+    if debug_writelane {
+        eprintln!("[CROSS_HALF_WRITE tracked resources]");
+        eprintln!("scalar={:#?}", resources.scalar);
+        eprintln!("descriptors={:#?}", resources.descriptors);
+    }
     let raised = io::raise(&p, native).map_err(|e| e.to_string())?;
     emit_for(&container, native, &p, &st, &raised, &resources, target)
         .map_err(|e| e.to_string())
