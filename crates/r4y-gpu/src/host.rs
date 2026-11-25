@@ -63,6 +63,8 @@ const RTV_RING: u32 = 1024;
 
 pub(crate) struct Host {
     pub(crate) device: ID3D12Device,
+    /// D3D12's supported wave-size range, queried once during device creation.
+    pub(crate) wave_target: r4y_shader::emit::Target,
     queue: ID3D12CommandQueue,
     fence: ID3D12Fence,
     /// The last value signalled on `fence`, behind the submission lock.
@@ -217,6 +219,36 @@ fn create() -> windows::core::Result<Host> {
             D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
         }
         let device = device.ok_or_else(windows::core::Error::empty)?;
+        let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+        let queried = device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS1,
+                (&raw mut options).cast(),
+                size_of_val(&options) as u32,
+            )
+            .is_ok();
+        let wave_target = if queried
+            && options.WaveOps.as_bool()
+            && options.WaveLaneCountMin > 0
+            && options.WaveLaneCountMin <= options.WaveLaneCountMax
+        {
+            r4y_shader::emit::Target {
+                lanes_min: options.WaveLaneCountMin,
+                lanes_max: options.WaveLaneCountMax,
+            }
+        } else {
+            r4y_shader::emit::Target::ANY
+        };
+        tracing::info!(
+            lanes_min = wave_target.lanes_min,
+            lanes_max = wave_target.lanes_max,
+            "host wave sizes"
+        );
+        if !wave_target.runs(64) {
+            tracing::warn!(
+                "the host has no 64-lane waves; console wave64 compute shaders that need cross-lane semantics cannot run natively"
+            );
+        }
         let messages = debug
             .then(|| device.cast::<ID3D12InfoQueue>().ok())
             .flatten();
@@ -295,6 +327,7 @@ fn create() -> windows::core::Result<Host> {
         }
         Ok(Host {
             device,
+            wave_target,
             queue,
             fence,
             submitted: Mutex::new(0),
