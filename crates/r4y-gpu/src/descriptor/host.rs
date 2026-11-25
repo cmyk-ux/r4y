@@ -91,6 +91,15 @@ const DYNAMIC: u32 = 1 << 18;
 /// (a capped heap, NVIDIA): the title's slots keep their room first.
 const MIN_DYNAMIC: u32 = 1 << 16;
 
+/// Whether a new maximum deserves an overflow warning.
+///
+/// High descriptor heaps are populated in runs of consecutive slots. Keep
+/// the highest observed index, but emit at most one warning per 4096-slot
+/// range instead of one warning for every slot in that run.
+fn should_report_heap_overflow(previous: u32, index: u32) -> bool {
+    index > previous && (previous == 0 || index >> 12 != previous >> 12)
+}
+
 impl HostHeap {
     pub(crate) fn new(sampler: bool, count: u32) -> Option<Self> {
         let host = host()?;
@@ -585,12 +594,13 @@ impl HostHeap {
             // Diagnostic (NVIDIA heap cap): the highest title slot past the
             // host heap seen so far.
             static HIGHEST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if HIGHEST.fetch_max(index, std::sync::atomic::Ordering::Relaxed) < index {
+            let previous = HIGHEST.fetch_max(index, std::sync::atomic::Ordering::Relaxed);
+            if should_report_heap_overflow(previous, index) {
                 tracing::warn!(
                     index,
                     count = self.count,
                     for_draw,
-                    "title slot past the host heap"
+                    "title slot past the host heap (high-water mark; one warning per 4096-slot range)"
                 );
             }
             return None;
@@ -1359,6 +1369,15 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heap_overflow_warnings_are_rate_limited_by_index_range() {
+        assert!(should_report_heap_overflow(0, 996_020));
+        assert!(!should_report_heap_overflow(996_020, 996_021));
+        assert!(!should_report_heap_overflow(996_020, 999_423));
+        assert!(should_report_heap_overflow(999_423, 999_424));
+        assert!(!should_report_heap_overflow(999_424, 996_100));
+    }
 
     /// The world's 16-byte view of 0 elements removed the device.
     #[test]
