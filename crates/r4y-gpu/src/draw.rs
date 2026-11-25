@@ -537,10 +537,21 @@ impl State {
         // the title binds none (the BVH builder's dispatches may not).
         let memory_heap = self.heaps[0] == 0
             && p.stages.iter().any(|s| s.memory.is_some() || has_root_views(&s.translated().host));
-        self.bind_heaps(list, memory_heap);
         let root = p.root.as_raw() as usize;
-        if self.host_roots[usize::from(compute)] != root {
-            // SAFETY: an open list and a live root signature.
+        let root_slot = usize::from(compute);
+        let root_changed = self.host_roots[root_slot] != root;
+        // Internal host operations can change descriptor-heap state without
+        // going through this State. Whenever a root signature changes, force
+        // a fresh heap bind immediately before installing it: D3D12 requires
+        // a shader-visible sampler heap to be bound for directly-indexed
+        // sampler root signatures, even when our cached pair looks unchanged.
+        if root_changed {
+            self.host_heaps = [usize::MAX; 2];
+        }
+        self.bind_heaps(list, memory_heap);
+        if root_changed {
+            // SAFETY: an open list and a live root signature; its heaps were
+            // just rebound above.
             unsafe {
                 if compute {
                     l.SetComputeRootSignature(&p.root);
@@ -548,7 +559,7 @@ impl State {
                     l.SetGraphicsRootSignature(&p.root);
                 }
             }
-            self.host_roots[usize::from(compute)] = root;
+            self.host_roots[root_slot] = root;
         }
         // By host object: a title pipeline released and another made at its
         // address is another host pipeline (the list keeps the old one).
