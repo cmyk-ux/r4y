@@ -1717,9 +1717,9 @@ impl State {
         // The helper output and optional count are consumed as indirect
         // arguments. The original argument shadow remains a shader-resource
         // input and is never rewritten by the clamp.
-        if let Some((counter_shadow, _)) = &counter {
-            list.buffer_state(counter_shadow, BUFFER_INDIRECT);
-        }
+        let count_state = counter.as_ref().map(|(counter_shadow, _)| {
+            list.buffer_state(counter_shadow, BUFFER_INDIRECT)
+        });
         // SAFETY: an open list with everything set; the buffers are host
         // copies the list keeps alive (refresh), the signature is cached.
         unsafe {
@@ -1735,7 +1735,10 @@ impl State {
         // A listed frame: what the records held (after the clamp).
         #[cfg(feature = "diagnostics")]
         if crate::capture::dump_on() {
-            let count = counter.as_ref().map(|(s, at)| (&s.buffer, s.offset(*at)));
+            let count = counter
+                .as_ref()
+                .zip(count_state)
+                .map(|((s, at), state)| (&s.buffer, s.offset(*at), state));
             let name = crate::pipeline::shaders_of(pipeline);
             crate::capture::read_indirect(list, (&bounded, 0), count, (kind, stride, max), name);
         }
