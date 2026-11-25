@@ -6,7 +6,7 @@
 >
 > **Visibility:** this file is committed to the repository. It is not private or access-controlled; anyone with repository access can read it.
 
-Last updated: 2026-11-25 (America/Sao_Paulo)
+Last updated: 2026-11-25 (America/Sao_Paulo); PR #16 console-flow implementation and CI #123 recorded
 Repository: https://github.com/cmyk-ux/r4y
 Primary checkout used by the user: `C:\Users\dysu\Downloads\r4y\r4y`
 Current investigation: GTA VI runtime on NVIDIA GeForce RTX 3070 / D3D12.
@@ -127,37 +127,71 @@ Next investigation:
 
 ### 4.3 Wave64 compute pipelines rejected on a wave32 host
 
-Observed in this run:
+Observed in the user's 2026-11-25 diagnostics run:
 - `Shader wants wave lane count of 64 but maximum wave lane count for device is 32`: 161 debug-layer messages.
-- `host pipeline refused`: 136 messages.
-- `host pipeline refused` entries show HRESULT `0x80070057` (invalid parameter) alongside the wave-size debug-layer refusal.
-- The current PowerShell regex attempt extracted zero hashes even though refusals exist; see the corrected extraction below.
-- Summary lines explicitly show dropped compute pipelines:
+- `host pipeline refused`: 136 messages, with HRESULT `0x80070057`.
+- Dropped/refused compute shader hashes:
   - `13dfdd3b1136e407`
   - `88994c3496045f51`
-- Frame summary examples:
-  - line 3837: 0.1 FPS, 8,500.2 ms/frame, 6 draws, 2 dropped without a host pipeline.
-  - lines 3857–3858 identify one refused compute pipeline: `13dfdd3b1136e407`.
-  - line 4462 identifies `88994c3496045f51` as refused.
-  - lines 4460 and 4595 again mention `13dfdd3b1136e407`.
-- The same run also has intermittent black-frame warnings; do not automatically attribute them all to wave64.
+- The log also contained intermittent black-frame warnings; do not automatically attribute all of them to Wave64.
 
-Current R4Y lowering inspected:
-`crates/r4y-shader/src/emit/lower.rs` chooses `wave = 64` for native wave64 programs and assigns that size when console-lane semantics or one-wave LDS require it. The current translation path must be audited to ensure host wave capabilities are actually supplied to lowering and cache fingerprints before these pipelines are emitted.
+Active implementation:
+- PR #16: https://github.com/cmyk-ux/r4y/pull/16
+- Branch: `feature/wave64-host-target`
+- Latest code/test commit at this handoff update: `f82f97dc1fc8207fc2b2e40ca5a7128a8feddf88`
+- Latest successful CI: run #123 — https://github.com/cmyk-ux/r4y/actions/runs/45568252909
+- PR title: **Add host-aware Wave64 split and console-flow translation**. Keep the PR open until the user's RTX 3070 dispatch test and GTA VI runtime comparison have been completed.
 
-Upstream research:
-- VIctory PR #233 — https://github.com/Marvisak/VIctory/pull/233
-- This proposes running suitable console wave64 compute programs as two host wave32 waves, with separate in-half and console-flow lowering, group-shared exchange, ballot/mask semantics, and host-specific shader cache keys.
-- The inspected PR was open and marked non-mergeable/draft state was false at the time. It is not a drop-in patch: it has explicit limitations (e.g. some >64-thread cross-lane groups, LDS cases, whole-wave sections and cross-half permute operations) and has undergone continuing changes.
-- R4Y diverged from upstream and has renamed crates/files. Rebase/port semantically, not mechanically.
+Implemented on the branch:
+1. Host-aware target and cache:
+   - `crates/r4y-gpu/src/host.rs` queries D3D12 OPTIONS1 for WaveOps and the supported lane range.
+   - Production uses `Target::NONE` if capability discovery fails; it does not assume a shader can use Wave32/64.
+   - `crates/r4y-shader/src/emit/mod.rs` adds `Target`, `translate_for`, and `emit_for`; the old APIs remain compatibility wrappers.
+   - `crates/r4y-gpu/src/shader_cache.rs` fingerprints the host wave range so DXIL from one adapter cannot be reused on an incompatible adapter.
+2. In-half split:
+   - Wave64 DPP and `ds_swizzle` programs whose lane references stay within each 32-lane half can be emitted as Wave32.
+   - Console flattened thread IDs and DPP row-mask indexing are preserved for the upper half.
+   - This path is conservative: no native LDS, cross-half operations, mask-as-data, whole-wave sections or unsupported lane instructions.
+3. Console-flow split:
+   - When the in-half path is insufficient, the lowerer may retry with `structure::structure_console` for exactly one console Wave64 group per thread group (at most 64 threads).
+   - Every vector instruction retains its per-lane EXEC guard; scalar/wave operations and synchronization are reached by all physical lanes.
+   - Branches on EXEC/VCC/SCC use a wave-wide any-lane decision, so the two host Wave32 halves follow the same branch and loop.
+   - Cross-half reads and mask values are exchanged via two group-shared dwords with barriers before and after the read.
+   - Lowering covers cross-half `v_readlane`, `v_readfirstlane`, `v_writelane`, `v_mbcnt`, ballot/mask operations, and selected EXEC/VCC/SCC branch forms.
+   - A `v_readfirstlane` used only to restore a descriptor in the existing waterfall path remains a per-lane restoration; it does not trigger a real whole-wave read.
+   - Path-dependent per-lane descriptor `LanePhi` values are explicitly refused in console flow.
+4. Tests:
+   - GPU-independent translation tests cover the target-specific PSV WaveSize, cross-half readlane, standalone readfirstlane, multi-wave refusal, mask count, mbcnt, divergent branch and divergent-loop translation.
+   - `crates/r4y-shader/src/emit/split_tests.rs` contains a D3D12 lane-by-lane dispatch test named `wave64_split_matches_console_on_d3d12_hardware`.
+   - On a Wave32 adapter it checks in-half DPP/swizzle for 32/64/128 threads, partial DPP row masks, mask ballot/count, `v_mbcnt_lo`, cross-half readlane, branch where only one half has active lanes, readfirstlane, saveexec/SCC, and a loop with per-lane iteration counts that reads lane 40.
+   - CI workflow runs this test separately and prints the reason if the hosted adapter cannot execute it.
 
-Next engineering task:
-1. Inspect the exact current main translation API, host feature probe and shader cache fingerprint.
-2. Make the host wave range (NVIDIA 32..32 vs AMD 32..64, etc.) part of shader translation and cache keys.
-3. Port the appropriate split-wave lowering and explicit refusals for unsupported patterns, rather than emitting DXIL requiring wave64 on NVIDIA.
-4. Keep native wave64 behavior unchanged on hosts that support it.
-5. Add GPU-independent IR/lowering tests and hardware tests; ensure Windows CI does not mistake WARP's nonstandard wave size for a normal 32-lane adapter.
-6. Measure the game's actual refused/dropped pipelines after the fix; a lower warning count alone is insufficient.
+Deliberate limitations:
+- Console flow is only for one console Wave64 per group (at most 64 threads).
+- No native LDS accesses, `ds_bpermute`/other permute operations, whole-wave reduction sections, multi-console-wave groups, or general LDS behavior.
+- Only the modeled SCC/VCC/EXEC zero/nonzero branch forms are supported. Unsupported forms remain refused; they must not be silently emitted.
+- The hosted GitHub runner does not expose a usable Wave32 or Wave64 capability, so a successful test process is not evidence of a D3D12 dispatch.
+
+Validation, CI run #123 on commit `f82f97d`:
+- PowerShell/MSVC checks: pass.
+- Clippy, normal and all-features: pass.
+- Release build: pass.
+- Workspace tests: **212 passed, 0 failed, 2 ignored, 3 filtered out**.
+- Dedicated D3D12 test command: test process passed, but its body explicitly skipped with `adapter supports neither 32- nor 64-lane waves; skipped`.
+- Therefore the code and translation regressions are CI-validated; the Wave32 GPU dispatch and runtime behavior are **not yet hardware-validated**.
+
+Next actions:
+1. On the user's RTX 3070 checkout, run:
+   ```powershell
+   cd C:\NVU\R4Y\r4y
+   git fetch origin feature/wave64-host-target
+   git switch feature/wave64-host-target
+   cargo test -p r4y-shader --locked wave64_split_matches_console_on_d3d12_hardware -- --show-output
+   ```
+   If the checkout path differs, use the actual local R4Y root. Expected startup capability is `lanes_min=32 lanes_max=32`; the test must execute (not skip) and match the expected per-lane output for every in-half and console-flow kernel.
+2. If that test passes, build `cargo build --release --locked -p r4y`, run GTA VI with focused diagnostics, and compare previously refused hashes `13dfdd3b1136e407` and `88994c3496045f51`. Separate pipelines fixed by this work from patterns still refused by the deliberate limitations.
+3. If the RTX dispatch test fails, preserve the failing kernel/assertion and fix that exact semantic issue before expanding support.
+4. Then resume the slot-zero SRV Texture1D/Texture2D provenance investigation and issue #4 descriptor virtualization. Do not confuse the Wave64 work with either descriptor issue.
 
 ### 4.4 The failed hash extraction
 
