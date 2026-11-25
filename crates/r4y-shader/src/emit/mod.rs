@@ -586,7 +586,10 @@ fn emit_for_with_console_flow(
     };
     let first = lower::lower(&parts(st, res, false));
     let l = match first {
-        Err(ShaderError::Unsupported { what: lower::CONSOLE_FLOW, .. }) if options.allow_console_flow => {
+        Err(ShaderError::Unsupported {
+            what: lower::CONSOLE_FLOW,
+            ..
+        }) if options.allow_console_flow => {
             // Re-structure as the console does: all lanes follow the same
             // block sequence, while EXEC is retained as each instruction's
             // vector guard. Only the bounded one-wave/no-LDS subset is sent
@@ -1350,7 +1353,7 @@ mod tests {
 
 #[cfg(test)]
 mod host_wave_target_tests {
-    use super::{Container, Target, emit_for_with_console_flow, lower};
+    use super::{Container, Target, emit_for_with_console_flow};
     use crate::native::{ComputeIo, HwStage, NativeProgram, StageIo};
     use crate::{ShaderError, io, ir, resource, structure};
 
@@ -1451,7 +1454,7 @@ mod host_wave_target_tests {
         assert!(matches!(
             translate_with_console_flow(&wave64_read_lane, nvidia, false),
             Err(ShaderError::Unsupported {
-                what: lower::CONSOLE_FLOW,
+                what: super::lower::CONSOLE_FLOW,
                 ..
             })
         ));
