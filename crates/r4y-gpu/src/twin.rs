@@ -450,16 +450,18 @@ impl Twin {
                     let (t, d) = (r.twin.Footprint, d);
                     let constants = [t.Width, t.Height, t.RowPitch, r.twin.Offset as u32, d.Footprint.RowPitch, d.Offset as u32, u32::from(to_depth), 0];
                     l.SetComputeRoot32BitConstants(0, 8, constants.as_ptr().cast(), 0);
-                    note(format!(
-                        "depth-twin conversion {} subresource={} {}x{} format={} source_pitch={} destination_pitch={}",
-                        if to_depth { "twin-to-depth" } else { "depth-to-twin" },
-                        r.depth_sub,
-                        t.Width,
-                        t.Height,
-                        d.Footprint.Format.0,
-                        t.RowPitch,
-                        d.Footprint.RowPitch,
-                    ));
+                    if crate::host::dred_on() {
+                        note(format!(
+                            "depth-twin conversion {} subresource={} {}x{} format={} source_pitch={} destination_pitch={}",
+                            if to_depth { "twin-to-depth" } else { "depth-to-twin" },
+                            r.depth_sub,
+                            t.Width,
+                            t.Height,
+                            d.Footprint.Format.0,
+                            t.RowPitch,
+                            d.Footprint.RowPitch,
+                        ));
+                    }
                     l.Dispatch(t.Width.div_ceil(2).div_ceil(64), t.Height, 1);
                 }
                 l.ResourceBarrier(&[uav_barrier(), state(UNORDERED_ACCESS as i32, COPY_SOURCE as i32)]);
