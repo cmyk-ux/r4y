@@ -259,7 +259,10 @@ fn wave64_split_matches_console_on_d3d12_hardware() {
             .flat_map(|_| {
                 (0..threads).map(|lane| {
                     let console_lane = lane % 64;
-                    if console_lane < 32 { console_lane } else { 1 }
+                    // The mask repeats for each console Wave64, but v0
+                    // remains the flat GroupThreadID (0..threads), not the
+                    // lane number within that wave.
+                    if console_lane < 32 { lane } else { 1 }
                 })
             })
             .collect();
