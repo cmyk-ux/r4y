@@ -55,8 +55,7 @@ pub fn counts() -> (u64, u64) {
 /// What a translation depends on besides its container: the translator
 /// (`r4y_shader::SOURCE_HASH`: its sources, manifest, the lock file and
 /// the compiler), the entry's encoding (this file's text) and the
-/// translation settings (the loop limit, which a diagnostics build can
-/// change at run time).
+/// translation settings (loop limit, heap layout and group-barrier mode).
 fn build() -> &'static [u8; 32] {
     static BUILD: OnceLock<[u8; 32]> = OnceLock::new();
     BUILD.get_or_init(|| {
@@ -67,20 +66,35 @@ fn build() -> &'static [u8; 32] {
                 "R4Y_SHADER_LOOP_LIMIT: translated loops stop sooner"
             );
         }
-        key(r4y_shader::SOURCE_HASH, ENCODING, limit, r4y_shader::emit::heap_views(), r4y_shader::emit::title_views())
+        let group_sync = r4y_shader::emit::group_sync();
+        if group_sync != 2 {
+            tracing::warn!(
+                group_sync,
+                "R4Y_GROUP_SYNC: using experimental group-barrier behavior"
+            );
+        }
+        key(
+            r4y_shader::SOURCE_HASH,
+            ENCODING,
+            limit,
+            r4y_shader::emit::heap_views(),
+            r4y_shader::emit::title_views(),
+            group_sync,
+        )
     })
 }
 
 /// This file, whose `encode` and `decode` define the entries.
 const ENCODING: &[u8] = include_bytes!("shader_cache.rs");
 
-fn key(translator: &str, encoding: &[u8], limit: u32, views: u32, title: u32) -> [u8; 32] {
+fn key(translator: &str, encoding: &[u8], limit: u32, views: u32, title: u32, group_sync: u8) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(translator.as_bytes());
     h.update(blake3::hash(encoding).as_bytes());
     h.update(&limit.to_le_bytes());
     h.update(&views.to_le_bytes());
     h.update(&title.to_le_bytes());
+    h.update(&[group_sync]);
     *h.finalize().as_bytes()
 }
 
@@ -436,11 +450,14 @@ mod tests {
     #[test]
     fn the_key_covers_translator_encoding_and_settings() {
         let views = r4y_shader::emit::HEAP_VIEWS;
-        let k = key("0123456789abcdef", b"encoding", 1 << 20, views, views);
-        assert_eq!(k, key("0123456789abcdef", b"encoding", 1 << 20, views, views));
-        assert_ne!(k, key("0123456789abcdee", b"encoding", 1 << 20, views, views));
-        assert_ne!(k, key("0123456789abcdef", b"encoding.", 1 << 20, views, views));
-        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 19, views, views));
+        let group_sync = 2;
+        let k = key("0123456789abcdef", b"encoding", 1 << 20, views, views, group_sync);
+        assert_eq!(k, key("0123456789abcdef", b"encoding", 1 << 20, views, views, group_sync));
+        assert_ne!(k, key("0123456789abcdee", b"encoding", 1 << 20, views, views, group_sync));
+        assert_ne!(k, key("0123456789abcdef", b"encoding.", 1 << 20, views, views, group_sync));
+        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 19, views, views, group_sync));
+        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 20, views, views, 1));
+        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 20, views, views, 0));
         assert_ne!(
             k,
             key("0123456789abcdef", b"encoding", 1 << 20, r4y_shader::emit::HEAP_VIEWS_PORTABLE, 721_469)
@@ -457,6 +474,7 @@ mod tests {
                 r4y_shader::emit::loop_limit(),
                 r4y_shader::emit::heap_views(),
                 r4y_shader::emit::title_views(),
+                r4y_shader::emit::group_sync(),
             )
         );
         // The encoding part is this file as built.
