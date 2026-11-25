@@ -1667,8 +1667,14 @@ impl State {
             s.refresh(list, *at, 4);
         }
         // Bounded first: the clamp binds a compute pipeline of its own.
-        if !crate::indirect::bound(list, &args, args.gpu(arguments), (kind, stride, max)) {
-            why("not bounded (no clamp, or arguments not 4-byte aligned)");
+        if !crate::indirect::bound(
+            list,
+            &args,
+            args.gpu(arguments),
+            counter.as_ref().map(|(shadow, address)| (shadow, *address)),
+            (kind, stride, max),
+        ) {
+            why("not bounded (no clamp, invalid layout, or unaligned arguments/count)");
             return false;
         }
         self.host_pipeline = 0;
