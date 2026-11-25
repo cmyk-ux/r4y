@@ -74,14 +74,14 @@ function Show-Banner {
     $lines = @(
         (' ' + ($b * 11) + '   ' + ($b * 5) + ' ' + ($b * 5) + '  ' + ($b * 5) + ' ' + ($b * 5)),
         (($s * 2) + ($b * 3) + ($s * 5) + ($b * 3) + ' ' + ($s * 2) + ($b * 3) + ' ' + ($s * 2) + ($b * 3) + '  ' + ($s * 2) + ($b * 3) + ' ' + ($s * 2) + ($b * 3) + ' '),
-        (' ' + $s + ($b * 3) + '    ' + $s + ($b * 3) + '  ' + ($b * 3) + '  ' + ($b * 3) + ' ' + $b + ' ' + ($s * 2) + ($b * 3) + ' ' + ($b * 3) + '  '),
+        (' ' + $s + ($b * 3) + '    ' + $s + ($b * 3) + '  ' + $s + ($b * 3) + '  ' + $s + ($b * 3) + ' ' + $b + ' ' + ($s * 2) + ($b * 3) + ' ' + ($b * 3) + '  '),
         (' ' + $s + ($b * 10) + '   ' + $s + ($b * 11) + '  ' + ($s * 2) + ($b * 5) + '   '),
         (' ' + $s + ($b * 3) + ($s * 5) + ($b * 3) + '  ' + ($s * 7) + ($b * 3) + $s + $b + '   ' + ($s * 2) + ($b * 3) + '    '),
         (' ' + $s + ($b * 3) + '    ' + $s + ($b * 3) + '        ' + $s + ($b * 3) + $s + '     ' + $s + ($b * 3) + '    '),
         (($b * 5) + '   ' + ($b * 5) + '       ' + ($b * 5) + '     ' + ($b * 5)),
         (($s * 5) + '   ' + ($s * 5) + '       ' + ($s * 5))
     )
-    Clear-Host
+    # Do not clear the console: this also runs in hosts without a cursor handle.
     foreach ($line in $lines) { Write-Host $line -ForegroundColor Cyan }
     Write-Host ''
     Write-Host 'R4Y - Recompile4You' -ForegroundColor White
