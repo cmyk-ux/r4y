@@ -68,19 +68,18 @@ function Write-Ok([string]$Message) { Write-Host ('[OK] ' + $Message) -Foregroun
 function Write-Warn([string]$Message) { Write-Host ('[!] ' + $Message) -ForegroundColor Yellow }
 
 function Show-Banner {
-    # Build the logo from Unicode code points so Windows PowerShell 5.1 can
-    # read this script even when the file is checked out without a UTF-8 BOM.
-    $full = [string][char]0x2588
-    $shade = [string][char]0x2592
+    # Use code points to keep this PowerShell 5.1 script safe without a UTF-8 BOM.
+    $b = [string][char]0x2588
+    $s = [string][char]0x2592
     $lines = @(
-        (($full * 11) + '   ' + ($full * 5) + ' ' + ($full * 5) + '  ' + ($full * 5) + ' ' + ($full * 5)),
-        (($shade * 2) + ($full * 3) + ($shade * 5) + ($full * 3) + ' ' + ($shade * 2) + ($full * 3) + ' ' + ($shade * 2) + ($full * 3) + '  ' + ($shade * 2) + ($full * 3) + ' ' + ($shade * 2) + ($full * 3)),
-        (' ' + $shade + ($full * 3) + '    ' + $shade + ($full * 3) + '  ' + $shade + ($full * 3) + '  ' + $shade + ($full * 3) + ' ' + $shade + ' ' + ($shade * 2) + ($full * 3) + ' ' + ($full * 3)),
-        (' ' + $shade + ($full * 10) + '   ' + $shade + ($full * 11) + '  ' + ($shade * 2) + ($full * 5)),
-        (' ' + $shade + ($full * 3) + ($shade * 5) + ($full * 3) + '  ' + ($shade * 6) + ($full * 3) + $shade + ' ' + '  ' + ($shade * 2) + ($full * 3)),
-        (' ' + $shade + ($full * 3) + '    ' + $shade + ($full * 3) + '        ' + $shade + ($full * 3) + $shade + '     ' + $shade + ($full * 3)),
-        (' ' + ($full * 5) + '   ' + ($full * 5) + '       ' + ($full * 5) + '     ' + ($full * 5)),
-        (($shade * 5) + '   ' + ($shade * 5) + '       ' + ($shade * 5))
+        (' ' + ($b * 11) + '   ' + ($b * 5) + ' ' + ($b * 5) + '  ' + ($b * 5) + ' ' + ($b * 5)),
+        (($s * 2) + ($b * 3) + ($s * 5) + ($b * 3) + ' ' + ($s * 2) + ($b * 3) + ' ' + ($s * 2) + ($b * 3) + '  ' + ($s * 2) + ($b * 3) + ' ' + ($s * 2) + ($b * 3) + ' '),
+        (' ' + $s + ($b * 3) + '    ' + $s + ($b * 3) + '  ' + ($b * 3) + '  ' + ($b * 3) + ' ' + $b + ' ' + ($s * 2) + ($b * 3) + ' ' + ($b * 3) + '  '),
+        (' ' + $s + ($b * 10) + '   ' + $s + ($b * 11) + '  ' + ($s * 2) + ($b * 5) + '   '),
+        (' ' + $s + ($b * 3) + ($s * 5) + ($b * 3) + '  ' + ($s * 7) + ($b * 3) + $s + $b + '   ' + ($s * 2) + ($b * 3) + '    '),
+        (' ' + $s + ($b * 3) + '    ' + $s + ($b * 3) + '        ' + $s + ($b * 3) + $s + '     ' + $s + ($b * 3) + '    '),
+        (($b * 5) + '   ' + ($b * 5) + '       ' + ($b * 5) + '     ' + ($b * 5)),
+        (($s * 5) + '   ' + ($s * 5) + '       ' + ($s * 5))
     )
     Clear-Host
     foreach ($line in $lines) { Write-Host $line -ForegroundColor Cyan }
@@ -88,6 +87,7 @@ function Show-Banner {
     Write-Host 'R4Y - Recompile4You' -ForegroundColor White
     Write-Host ''
 }
+
 
 function Confirm-Action([string]$Question) {
     if ($script:AssumeYes) { return $true }
@@ -263,20 +263,11 @@ function Save-State([string]$GameDirectory, [string]$Executable) {
 }
 
 function Select-Game {
-    $state = Load-State
-    if ($state -and $state.game_dir -and $state.exe -and
-        (Test-Path -LiteralPath $state.game_dir -PathType Container) -and (Test-Path -LiteralPath $state.exe -PathType Leaf)) {
-        if ($script:AssumeYes) { return @($state.game_dir, $state.exe) }
-        if (-not [Console]::IsInputRedirected) {
-            $answer = Read-Host ('Reuse last game folder and executable? [Y/n]')
-            if (-not $answer -or $answer -notmatch '^(?i:n|no)$') { return @($state.game_dir, $state.exe) }
-        }
-    }
-
-    # The game data directory and executable are two independent selections.
+    # Every setup asks for the data folder. Never bake one tester's absolute path
+    # into the installer; the executable is resolved relative to the selected folder.
     $directory = $null
     if (-not [Console]::IsInputRedirected) {
-        $typedDirectory = Read-Host 'Select the game folder (data directory), or press ENTER to browse'
+        $typedDirectory = Read-Host 'Select the game folder (the folder containing game_scarlett_master.exe), or press ENTER to browse'
         if ($typedDirectory) { $directory = $typedDirectory.Trim().Trim('"') }
     }
     if (-not $directory) { $directory = Pick-Folder }
@@ -285,29 +276,50 @@ function Select-Game {
     }
     $directory = (Resolve-Path -LiteralPath $directory).ProviderPath
 
+    # The executable must be in the selected folder. Resolve its path dynamically
+    # so each tester can install the game anywhere on their own machine.
+    $expectedExe = Join-Path $directory 'game_scarlett_master.exe'
     $executable = $null
-    if (-not [Console]::IsInputRedirected) {
-        $typedExecutable = Read-Host 'Now select the game executable (.exe); it may be in a different folder'
-        if ($typedExecutable) { $executable = $typedExecutable.Trim().Trim('"') }
-    }
-    if (-not $executable) { $executable = Pick-File $directory }
-    if (-not $executable -and -not [Console]::IsInputRedirected) {
-        $executable = (Read-Host 'Enter the full path to the game executable').Trim().Trim('"')
+    if (Test-Path -LiteralPath $expectedExe -PathType Leaf) {
+        $executable = (Resolve-Path -LiteralPath $expectedExe).ProviderPath
+    } else {
+        $found = @(Get-ChildItem -LiteralPath $directory -Filter '*.exe' -File -ErrorAction SilentlyContinue)
+        if ($found.Count -eq 1) {
+            $executable = $found[0].FullName
+        } elseif ($found.Count -gt 1 -and -not [Console]::IsInputRedirected) {
+            Write-Warn 'game_scarlett_master.exe was not found; select the correct executable from this folder:'
+            for ($i = 0; $i -lt $found.Count; $i++) {
+                Write-Host ('[' + ($i + 1) + '] ' + $found[$i].Name)
+            }
+            $choice = Read-Host 'Executable number'
+            if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $found.Count) {
+                $executable = $found[[int]$choice - 1].FullName
+            }
+        }
     }
 
-    if (-not $executable -or -not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-        throw 'A valid game executable was not selected.'
+    if (-not $executable) {
+        $executable = Pick-File $directory
     }
+    if (-not $executable -and -not [Console]::IsInputRedirected) {
+        $executable = (Read-Host 'Enter the full path to the executable inside the selected game folder').Trim().Trim('"')
+    }
+    if (-not $executable -or -not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+        throw 'A valid game executable was not selected in the chosen game folder.'
+    }
+
     $candidate = Get-Item -LiteralPath $executable
     if ($candidate.Extension -ine '.exe') {
         throw ('The selected game executable must be a .exe file: ' + $candidate.FullName)
     }
     $executable = $candidate.FullName
+    if (-not $executable.StartsWith(($directory.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The game executable must be inside the selected game folder.'
+    }
 
-    # Do not require the executable to live under game_dir: some dumps and
-    # compatibility layouts keep the launcher/executable in a separate path.
     return @($directory, $executable)
 }
+
 
 function ConvertTo-TomlString([string]$Value) {
     $slash = [string][char]92
@@ -393,7 +405,7 @@ function Invoke-Setup {
     $cargo = Get-Cargo
     if (-not $cargo) { throw 'Cargo was not found after prerequisite checks. Open a new terminal and rerun R4Y.' }
 
-    Write-Step 'Select your game folder and executable'
+    Write-Step 'Select the game folder (the installer finds the executable inside it)'
     $selection = Select-Game
     $gameDirectory = [string]$selection[0]
     $exePath = [string]$selection[1]
