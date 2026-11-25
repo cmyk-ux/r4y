@@ -27,28 +27,45 @@ use crate::host::{BUFFER_INDIRECT, BUFFER_UAV, HostList, host, transition};
 use crate::shadow::Shadow;
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=4, b0), UAV(u0), UAV(u1), UAV(u2)"
+#define RS "RootConstants(num32BitConstants=4, b0), SRV(t0), SRV(t1), UAV(u0), UAV(u1)"
 cbuffer Record : register(b0) { uint kind; uint stride; uint records; uint has_count; };
-RWByteAddressBuffer args : register(u0);
-// Optional ExecuteIndirect count buffer. It is bound as a UAV so it can
-// share a resource/state with the argument buffer if both live in one
-// title shadow allocation; this shader only reads it.
-RWByteAddressBuffer count_buf : register(u1);
+ByteAddressBuffer args : register(t0);
+ByteAddressBuffer count_buf : register(t1);
+RWByteAddressBuffer dst_args : register(u0);
 // The list's work so far (vertex instances, threads): past the budget,
 // records run empty.
-RWByteAddressBuffer budget : register(u2);
+RWByteAddressBuffer budget : register(u1);
 static const uint BUDGET = 1u << 27;
 // Groups of one dispatch; more run empty.
 static const uint GROUPS = 1u << 20;
+
+// Bounded, saturating accounting: never wrap the per-list budget and never
+// spin indefinitely under contention.
+bool charge_budget(uint cost) {
+    if (cost == 0) return false;
+    uint before;
+    budget.InterlockedOr(0, 0, before);
+    bool settled = false;
+    [allow_uav_condition]
+    for (uint tries = 0; tries < 256 && before < BUDGET; tries++) {
+        uint next = (BUDGET - before <= cost) ? BUDGET : (before + cost);
+        uint previous;
+        budget.InterlockedCompareExchange(0, before, next, previous);
+        if (previous == before) { settled = true; break; }
+        before = previous;
+    }
+    return !settled || before >= BUDGET || BUDGET - before < cost;
+}
+
 [RootSignature(RS)]
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
-    // ExecuteIndirect will also honor this count, but the clamp must honor
-    // it too: records beyond the count are not active input and must not be
-    // read or modified.
+    // ExecuteIndirect also honors this count. The helper must honor it too:
+    // records beyond the active count are not read or copied.
     uint active = records;
     if (has_count != 0) active = min(active, count_buf.Load(0));
     if (id.x >= active) return;
+
     uint at = id.x * stride;
     uint cost;
     if (kind <= 1) {
@@ -56,27 +73,37 @@ void main(uint3 id : SV_DispatchThreadID) {
         uint count = min(args.Load(at), 1u << 24);
         uint instances = min(args.Load(at + 4), (1u << 26) / max(count, 1u));
         cost = count * instances;
-        args.Store2(at, uint2(count, instances));
+        for (uint off = 8; off < stride; off += 4) {
+            dst_args.Store(at + off, args.Load(at + off));
+        }
+        bool over = charge_budget(cost);
+        if (over) {
+            count = 0;
+            instances = 0;
+        }
+        dst_args.Store2(at, uint2(count, instances));
     } else if (kind == 2) {
-        uint3 g = min(args.Load3(at), uint3(65535, 65535, 65535));
+        uint3 g = min(args.Load3(at), uint3(65535u, 65535u, 65535u));
         // x * y fits 32 bits; the whole count may not.
         if (g.z != 0 && g.x * g.y > GROUPS / g.z) {
             g = uint3(0, 0, 0);
         }
-        cost = g.x * g.y * g.z * 64;
-        args.Store3(at, g);
+        cost = g.x * g.y * g.z * 64u;
+        for (uint off = 12; off < stride; off += 4) {
+            dst_args.Store(at + off, args.Load(at + off));
+        }
+        if (charge_budget(cost)) g = uint3(0, 0, 0);
+        dst_args.Store3(at, g);
     } else {
         // Mesh dispatches: the console's are one-dimensional.
         uint3 g = args.Load3(at);
         g = uint3(min(g.x, 65535u), min(g.y, 1u), min(g.z, 1u));
-        cost = g.x * g.y * g.z * 128;
-        args.Store3(at, g);
-    }
-    uint before;
-    budget.InterlockedAdd(0, cost, before);
-    if (before >= BUDGET || before + cost > BUDGET) {
-        // Draws keep their layout with no vertices; groups become zero.
-        args.Store(at, 0);
+        cost = g.x * g.y * g.z * 128u;
+        for (uint off = 12; off < stride; off += 4) {
+            dst_args.Store(at + off, args.Load(at + off));
+        }
+        if (charge_budget(cost)) g = uint3(0, 0, 0);
+        dst_args.Store3(at, g);
     }
 }
 "#;
@@ -151,69 +178,87 @@ fn make() -> windows::core::Result<Clamp> {
     }
 }
 
-/// Records, in `list`, the clamp of at most `records` records of `kind`
-/// (PC argument numbering) `stride` bytes apart at host address `gpu` in
-/// `buffer`, also bounded by the optional count buffer at `count`. The
-/// count is consumed by the helper shader as well as by ExecuteIndirect, so
-/// inactive tail records are never read or changed. Replaces the list's
-/// compute root signature and pipeline (callers bind theirs after). False
-/// if the clamp is not available.
+/// Minimum record byte stride for a supported PC indirect argument kind.
+fn min_stride(kind: u32) -> Option<u32> {
+    match kind {
+        0 => Some(16),
+        1 => Some(20),
+        2 | 10 => Some(12),
+        _ => None,
+    }
+}
+
+/// Validates the byte range and the dword alignment required by ByteAddressBuffer.
+fn validate_layout(
+    (kind, stride, records): (u32, u32, u32),
+    args_gpu: u64,
+    count_gpu: Option<u64>,
+) -> Option<u64> {
+    if stride < min_stride(kind)? || !stride.is_multiple_of(4) || !args_gpu.is_multiple_of(4) {
+        return None;
+    }
+    if count_gpu.is_some_and(|address| !address.is_multiple_of(4)) {
+        return None;
+    }
+    let bytes = u64::from(stride).checked_mul(u64::from(records))?;
+    (bytes <= u64::from(u32::MAX)).then_some(bytes)
+}
+
+/// Records a non-destructive clamp of active indirect records into this
+/// list's reusable device-local scratch buffer. The title's argument and
+/// optional count buffers are read-only inputs; ExecuteIndirect consumes
+/// the returned output buffer at offset zero.
 pub(crate) fn bound(
     list: &HostList,
     shadow: &Arc<Shadow>,
     gpu: u64,
     count: Option<(&Arc<Shadow>, u64)>,
     (kind, stride, records): (u32, u32, u32),
-) -> bool {
-    let (Some(c), Some(budget)) = (clamp(), list.budget()) else {
-        return false;
-    };
-    if !gpu.is_multiple_of(4) || !stride.is_multiple_of(4) {
-        return false;
+) -> Option<ID3D12Resource> {
+    let count_gpu = count.map(|(counter, address)| counter.gpu(address));
+    let bytes = validate_layout((kind, stride, records), gpu, count_gpu)?;
+    let c = clamp()?;
+    let budget = list.budget()?;
+    let dst = list.indirect_scratch(bytes)?;
+    // SAFETY: live D3D12 buffer resources.
+    let dst_gpu = unsafe { dst.GetGPUVirtualAddress() };
+    if !budget.is_multiple_of(4) || !dst_gpu.is_multiple_of(4) {
+        return None;
     }
-    let l = &list.list;
+
+    // The source and count are shader reads. If they alias the same shadow
+    // resource, the tracker coalesces these compatible read states.
+    list.buffer_state(shadow, crate::host::BUFFER_SHADER_RESOURCE);
     let count_gpu = match count {
-        Some((counter, address)) => {
-            list.buffer_state(counter, BUFFER_UAV);
-            counter.gpu(address)
+        Some((counter, _)) => {
+            list.buffer_state(counter, crate::host::BUFFER_SHADER_RESOURCE);
+            count_gpu.expect("count address was computed above")
         }
         None => gpu,
     };
+
     let constants = [kind, stride, records, u32::from(count.is_some())];
-    list.buffer_state(shadow, BUFFER_UAV);
-    // SAFETY: an open list; our root signature, pipeline and live argument,
-    // optional count, and budget buffers. The argument/count buffers are in
-    // UAV state for this helper; the same shadow may legally back both UAV
-    // root descriptors.
+    let l = &list.list;
+    // SAFETY: the open list owns the source and count shadows, scratch
+    // resource and budget for their full execution lifetime. Earlier guest
+    // UAV writes are ordered before these SRV reads; the scratch is already
+    // in UAV state via HostList::indirect_scratch.
     unsafe {
-        // Earlier shader writes (the title's argument and count passes) first.
         l.ResourceBarrier(&[uav_barrier()]);
         l.SetComputeRootSignature(&c.root);
         l.SetPipelineState(&c.pso);
         l.SetComputeRoot32BitConstants(0, 4, constants.as_ptr().cast(), 0);
-        l.SetComputeRootUnorderedAccessView(1, gpu);
-        l.SetComputeRootUnorderedAccessView(2, count_gpu);
-        l.SetComputeRootUnorderedAccessView(3, budget);
-        l.Dispatch(records.div_ceil(64), 1, 1);
-        l.ResourceBarrier(&[
-            uav_barrier(),
-            transition(
-                &shadow.buffer,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
-            ),
-        ]);
+        l.SetComputeRootShaderResourceView(1, gpu);
+        l.SetComputeRootShaderResourceView(2, count_gpu);
+        l.SetComputeRootUnorderedAccessView(3, dst_gpu);
+        l.SetComputeRootUnorderedAccessView(4, budget);
+        if records > 0 {
+            l.Dispatch(records.div_ceil(64), 1, 1);
+        }
     }
-    list.set_buffer_state(shadow, BUFFER_INDIRECT);
-    true
+    list.indirect_ready();
+    Some(dst)
 }
-
-/// After the execution: the copy back to unordered access, where title
-/// passes may continue using it.
-pub(crate) fn done(list: &HostList, shadow: &Arc<Shadow>) {
-    list.buffer_state(shadow, BUFFER_UAV);
-}
-
 fn uav_barrier() -> D3D12_RESOURCE_BARRIER {
     D3D12_RESOURCE_BARRIER {
         Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
@@ -237,14 +282,33 @@ mod tests {
 
     #[test]
     fn clamp_limits_its_work_to_execute_indirect_count() {
-        assert!(super::SOURCE.contains("if (has_count != 0)"));
         assert!(super::SOURCE.contains("active = min(active, count_buf.Load(0))"));
         assert!(super::SOURCE.contains("if (id.x >= active) return"));
+        assert!(super::SOURCE.contains("ByteAddressBuffer args : register(t0)"));
+        assert!(super::SOURCE.contains("RWByteAddressBuffer dst_args : register(u0)"));
     }
 
     #[test]
     fn clamp_without_count_keeps_the_maximum_record_count() {
-        // The no-count path leaves `active` equal to `records`.
+        // has_count == 0 leaves the active range equal to `records`.
         assert!(super::SOURCE.contains("uint active = records"));
+    }
+
+    #[test]
+    fn indirect_layout_rejects_short_or_unaligned_records() {
+        assert_eq!(super::min_stride(0), Some(16));
+        assert_eq!(super::min_stride(1), Some(20));
+        assert_eq!(super::min_stride(2), Some(12));
+        assert_eq!(super::min_stride(10), Some(12));
+        assert_eq!(super::min_stride(99), None);
+        assert_eq!(super::validate_layout((0, 12, 2), 0x1000, None), None);
+        assert_eq!(super::validate_layout((0, 16, 2), 0x1002, None), None);
+        assert_eq!(super::validate_layout((0, 16, 2), 0x1000, Some(0x2002)), None);
+    }
+
+    #[test]
+    fn indirect_layout_checks_scratch_size() {
+        assert_eq!(super::validate_layout((0, 16, 4), 0x1000, None), Some(64));
+        assert_eq!(super::validate_layout((2, 12, 0), 0x1000, None), Some(0));
     }
 }
