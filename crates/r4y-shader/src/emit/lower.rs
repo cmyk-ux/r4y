@@ -634,12 +634,17 @@ impl<'a> Lower<'a> {
             // other half, so they still require a native 64-lane wave.
             let whole = |i: &Inst| {
                 let n = i.name();
+                // Waterfall descriptor reads are restored per lane below;
+                // they are not a read of the console wave's first lane.
+                let reads_first_lane = n == "v_readfirstlane_b32"
+                    && !i
+                        .writes
+                        .first()
+                        .is_some_and(|w| x.res.waterfall.reads.contains(&w.1));
                 n.contains("permute")
                     || n.starts_with("v_mbcnt")
-                    || matches!(
-                        n,
-                        "v_readlane_b32" | "v_writelane_b32" | "v_readfirstlane_b32"
-                    )
+                    || matches!(n, "v_readlane_b32" | "v_writelane_b32")
+                    || reads_first_lane
                     || reads_mask_as_data(x.st, i)
             };
             let reads_whole = insts().any(whole);
@@ -676,7 +681,6 @@ impl<'a> Lower<'a> {
             split = console_lanes
                 && x.native.wave64
                 && !reads_whole
-                && !insts().any(|i| i.name() == "v_readfirstlane_b32")
                 && !masks_held
                 && s.lds_dwords == 0
                 && !x.target.runs(64)
