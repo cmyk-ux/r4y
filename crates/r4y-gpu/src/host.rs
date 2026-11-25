@@ -1361,13 +1361,13 @@ impl HostList {
         &self,
         shadow: &std::sync::Arc<crate::shadow::Shadow>,
         wanted: u32,
-    ) {
+    ) -> u32 {
         let mut buffers = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
         let key = std::sync::Arc::as_ptr(shadow) as usize;
         let before = buffers.get(&key).map_or(0, |entry| entry.0);
         let after = buffer_after(before, wanted);
         if after == before {
-            return;
+            return after;
         }
         buffers.insert(key, (after, shadow.clone()));
         if before != 0 {
@@ -1380,6 +1380,7 @@ impl HostList {
                 )])
             };
         }
+        after
     }
 
     /// Record the state left by an explicit barrier already emitted by a
@@ -1695,6 +1696,17 @@ impl HostList {
             deferred
                 .copies
                 .push(Step::Host(Box::new(move || unsafe { (at as *mut u32).write_volatile(0) })));
+            // Buffers cannot be implicitly promoted from COMMON to UAV.
+            // They decay to COMMON after each ExecuteCommandLists, so record
+            // this explicit transition once per list recording.
+            // SAFETY: the list is open and the budget buffer is live.
+            unsafe {
+                self.list.ResourceBarrier(&[transition(
+                    buffer,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                )]);
+            }
         }
         // SAFETY: a live buffer.
         Some(unsafe { buffer.GetGPUVirtualAddress() })
