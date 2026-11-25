@@ -255,6 +255,15 @@ fn root_buffer(
     Some((base, root_offset(base, len, address, bytes)?))
 }
 
+/// Root-SRV addresses and byte offsets for the clamp's immutable inputs.
+#[derive(Clone, Copy)]
+struct Inputs {
+    args: u64,
+    args_offset: u32,
+    count: Option<u64>,
+    count_offset: u32,
+}
+
 /// Records one non-destructive clamp dispatch against raw GPU virtual
 /// addresses. Resource state transitions and lifetime are the caller's job.
 fn record_clamp(
@@ -262,19 +271,16 @@ fn record_clamp(
     l: &ID3D12GraphicsCommandList,
     dst: &ID3D12Resource,
     budget: u64,
-    args_gpu: u64,
-    args_offset: u32,
-    count_gpu: Option<u64>,
-    count_offset: u32,
+    inputs: Inputs,
     (kind, stride, records): (u32, u32, u32),
 ) -> bool {
-    let Some(bytes) = validate_layout((kind, stride, records), args_gpu, count_gpu) else {
+    let Some(bytes) = validate_layout((kind, stride, records), inputs.args, inputs.count) else {
         return false;
     };
-    if !args_offset.is_multiple_of(4)
-        || !count_offset.is_multiple_of(4)
-        || u64::from(args_offset).checked_add(bytes).is_none_or(|end| end > u64::from(u32::MAX))
-        || u64::from(count_offset) + 4 > u64::from(u32::MAX)
+    if !inputs.args_offset.is_multiple_of(4)
+        || !inputs.count_offset.is_multiple_of(4)
+        || u64::from(inputs.args_offset).checked_add(bytes).is_none_or(|end| end > u64::from(u32::MAX))
+        || u64::from(inputs.count_offset) + 4 > u64::from(u32::MAX)
     {
         return false;
     }
@@ -287,9 +293,9 @@ fn record_clamp(
         kind,
         stride,
         records,
-        u32::from(count_gpu.is_some()),
-        args_offset,
-        count_offset,
+        u32::from(inputs.count.is_some()),
+        inputs.args_offset,
+        inputs.count_offset,
     ];
     // SAFETY: an open list, a compatible root signature/pipeline, and live
     // source, optional count, destination and budget buffer GPU addresses.
@@ -298,8 +304,8 @@ fn record_clamp(
         l.SetComputeRootSignature(&c.root);
         l.SetPipelineState(&c.pso);
         l.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
-        l.SetComputeRootShaderResourceView(1, args_gpu);
-        l.SetComputeRootShaderResourceView(2, count_gpu.unwrap_or(args_gpu));
+        l.SetComputeRootShaderResourceView(1, inputs.args);
+        l.SetComputeRootShaderResourceView(2, inputs.count.unwrap_or(inputs.args));
         l.SetComputeRootUnorderedAccessView(3, dst_gpu);
         l.SetComputeRootUnorderedAccessView(4, budget);
         if records > 0 {
@@ -350,10 +356,12 @@ pub(crate) fn bound(
         &list.list,
         &dst,
         budget,
-        args_gpu,
-        args_offset,
-        count_gpu,
-        count_offset,
+        Inputs {
+            args: args_gpu,
+            args_offset,
+            count: count_gpu,
+            count_offset,
+        },
         (kind, stride, records),
     ) {
         return None;
@@ -539,10 +547,12 @@ mod tests {
             &list.list,
             &dst,
             budget_gpu,
-            source_gpu,
-            0,
-            Some(count_gpu),
-            0,
+            super::Inputs {
+                args: source_gpu,
+                args_offset: 0,
+                count: Some(count_gpu),
+                count_offset: 0,
+            },
             (0, 16, 3),
         ));
         list.indirect_ready();
