@@ -82,6 +82,21 @@ impl Host {
         })
     }
 
+    /// Human-readable capability reason for a shader the adapter cannot run.
+    pub fn shader_wave_limit(&self, dxil: &[u8]) -> Option<String> {
+        let wave = wave_size(dxil)?;
+        match self.wave_target {
+            Some(target) if target.runs(wave) => None,
+            Some(target) => Some(format!(
+                "shader requires WaveSize({wave}), adapter supports {}..={}",
+                target.lanes_min, target.lanes_max
+            )),
+            None => Some(format!(
+                "shader requires WaveSize({wave}), adapter did not report D3D12 wave capabilities"
+            )),
+        }
+    }
+
     /// The default adapter, or WARP with `warp` (or `R4Y_WARP=1`).
     pub fn new(warp: bool) -> Result<Self, String> {
         let warp = warp || std::env::var("R4Y_WARP").is_ok_and(|v| v == "1");
