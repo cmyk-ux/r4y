@@ -9530,54 +9530,35 @@ impl<'a> Lower<'a> {
                 Term::Br(self.block[t].expect("reachable"))
             }
             LaneExit::Branch {
+                taken,
+                not_taken,
+                ..
+            } if self.console_cf => {
+                let cond = self
+                    .console_branch(b)
+                    .map_err(|why| unsupported(offset, why))?;
+                self.branch_term(b, cond, taken, not_taken)
+            }
+            LaneExit::Branch {
                 when,
                 taken,
                 not_taken,
             } => {
-                // A negated condition branches the other way round.
                 let (cond, taken, not_taken) = match self.x.st.bools.node(when) {
                     Some((atom, Bool::TRUE, Bool::FALSE)) => {
-                        let a = self
+                        let atom = self
                             .atom(atom, self.cur)
-                            .map_err(|w| unsupported(offset, w))?;
-                        (a, not_taken, taken)
+                            .map_err(|why| unsupported(offset, why))?;
+                        (atom, not_taken, taken)
                     }
                     _ => {
-                        let c = self
+                        let cond = self
                             .boolean(when, self.cur)
-                            .map_err(|w| unsupported(offset, w))?;
-                        (c, taken, not_taken)
+                            .map_err(|why| unsupported(offset, why))?;
+                        (cond, taken, not_taken)
                     }
                 };
-                // A back edge is taken only below the iteration limit.
-                let back =
-                    |l: &Self, to: usize| l.counters.contains_key(&to) && l.rpo[to] <= l.rpo[b];
-                // (No `xor` of a compare: a loop exit testing one hung the
-                // AMD driver.)
-                let cond = if back(self, taken) {
-                    let ok = self.count_iteration(taken, pred::IULT);
-                    self.s.m.bin(self.cur, Bin::And, cond, ok)
-                } else if back(self, not_taken) {
-                    let stop = self.count_iteration(not_taken, pred::IUGE);
-                    self.s.m.bin(self.cur, Bin::Or, cond, stop)
-                } else {
-                    cond
-                };
-                // Critical edges get a block of their own, so loops have
-                // dedicated exits and preheaders as DXC emits them.
-                let (t, f) = (self.edge(b, taken), self.edge(b, not_taken));
-                for (to, via) in [(taken, t), (not_taken, f)] {
-                    if !back(self, to) {
-                        // From an edge block, or from here.
-                        let from = if Some(via) == self.block[to] {
-                            self.cur
-                        } else {
-                            via
-                        };
-                        self.enter_loop(b, to, from);
-                    }
-                }
-                Term::CondBr(cond, t, f)
+                self.branch_term(b, cond, taken, not_taken)
             }
             LaneExit::End => {
                 if self.s.pixel && !self.exported[b] && !self.has_done_export(b) {
@@ -9593,6 +9574,30 @@ impl<'a> Lower<'a> {
         let _ = Exit::End;
         self.s.m.terminate(self.cur, term);
         Ok(())
+    }
+
+    /// Emit a branch while preserving the bounded loop-counter guards.
+    fn branch_term(&mut self, block: usize, cond: V, taken: usize, not_taken: usize) -> Term {
+        let back = |l: &Self, to: usize| {
+            l.counters.contains_key(&to) && l.rpo[to] <= l.rpo[block]
+        };
+        let cond = if back(self, taken) {
+            let ok = self.count_iteration(taken, pred::IULT);
+            self.s.m.bin(self.cur, Bin::And, cond, ok)
+        } else if back(self, not_taken) {
+            let stop = self.count_iteration(not_taken, pred::IUGE);
+            self.s.m.bin(self.cur, Bin::Or, cond, stop)
+        } else {
+            cond
+        };
+        let (t, f) = (self.edge(block, taken), self.edge(block, not_taken));
+        for (to, via) in [(taken, t), (not_taken, f)] {
+            if !back(self, to) {
+                let from = if Some(via) == self.block[to] { self.cur } else { via };
+                self.enter_loop(block, to, from);
+            }
+        }
+        Term::CondBr(cond, t, f)
     }
 
     /// A forward edge into loop header `to` (from DXIL block `via`) starts
