@@ -1408,6 +1408,7 @@ mod host_wave_target_tests {
 
     #[test]
     fn console_flow_translates_wave64_mask_count_and_shared_exchange() {
+        let nvidia = Target { lanes_min: 32, lanes_max: 32 };
         let mask_count = compute(
             &[
                 0x7D88_00A8, // v_cmp_gt_u32 vcc, 40, v0
@@ -1417,8 +1418,46 @@ mod host_wave_target_tests {
             ],
             true,
         );
-        let nvidia = Target { lanes_min: 32, lanes_max: 32 };
         let shader = translate(&mask_count, nvidia).unwrap();
+        assert_eq!(wave_size(&shader.dxil), Some(32));
+
+        let branch = compute(
+            &[
+                0x7E04_0281, // v_mov_b32 v2, 1
+                0x7D88_0094, // v_cmp_gt_u32 vcc, 20, v0
+                0xBE8A_246A, // s_and_saveexec_b64 s[10:11], vcc
+                0xBF88_0003, // s_cbranch_execz end
+                0xD760_0009,
+                0x0001_1500, // v_readlane_b32 s9, v0, 10
+                0x7E04_0209, // v_mov_b32 v2, s9
+                0x88FE_0A7E, // s_or_b64 exec, exec, s[10:11]
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let shader = translate(&branch, nvidia).unwrap();
+        assert_eq!(wave_size(&shader.dxil), Some(32));
+
+        let loop_body = compute(
+            &[
+                0xBE89_0380, // s_mov_b32 s9, 0
+                0x7E04_0280, // v_mov_b32 v2, 0
+                0x7D8A_0080, // v_cmp_ne_u32 vcc, 0, v0
+                0xBE8A_246A, // s_and_saveexec_b64 s[10:11], vcc
+                0xBF88_0006, // s_cbranch_execz end
+                0xD760_0009,
+                0x0001_5100, // v_readlane_b32 s9, v0, 40
+                0x4A04_0481, // v_add_nc_u32 v2, 1, v2
+                0x7D82_0102, // v_cmp_lt_u32 vcc, v2, v0
+                0x87FE_6A7E, // s_and_b64 exec, exec, vcc
+                0xBF89_FFFA, // s_cbranch_execnz loop
+                0x88FE_0A7E, // s_or_b64 exec, exec, s[10:11]
+                0x4A04_0409, // v_add_nc_u32 v2, s9, v2
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let shader = translate(&loop_body, nvidia).unwrap();
         assert_eq!(wave_size(&shader.dxil), Some(32));
     }
 }
