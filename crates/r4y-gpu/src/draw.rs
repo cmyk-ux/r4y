@@ -1717,7 +1717,7 @@ impl State {
         // The helper output and optional count are consumed as indirect
         // arguments. The original argument shadow remains a shader-resource
         // input and is never rewritten by the clamp.
-        let count_state = counter.as_ref().map(|(counter_shadow, _)| {
+        let _count_state = counter.as_ref().map(|(counter_shadow, _)| {
             list.buffer_state(counter_shadow, BUFFER_INDIRECT)
         });
         // SAFETY: an open list with everything set; the buffers are host
@@ -1737,7 +1737,7 @@ impl State {
         if crate::capture::dump_on() {
             let count = counter
                 .as_ref()
-                .zip(count_state)
+                .zip(_count_state)
                 .map(|((s, at), state)| (&s.buffer, s.offset(*at), state));
             let name = crate::pipeline::shaders_of(pipeline);
             crate::capture::read_indirect(list, (&bounded, 0), count, (kind, stride, max), name);
