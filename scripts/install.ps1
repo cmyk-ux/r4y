@@ -5,7 +5,12 @@ param([string]$OptionString = '')
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$script:Root = Split-Path -Parent $PSCommandPath
+$script:ScriptDirectory = Split-Path -Parent $PSCommandPath
+$script:Root = Split-Path -Parent $script:ScriptDirectory
+if (-not (Test-Path -LiteralPath (Join-Path $script:Root 'Cargo.toml') -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $script:Root 'apps\r4y\Cargo.toml') -PathType Leaf)) {
+    throw ('Could not resolve the R4Y workspace root from installer path: ' + $PSCommandPath)
+}
 $script:LocalRoot = Join-Path $env:LOCALAPPDATA 'R4Y'
 $script:ConfigPath = Join-Path $script:LocalRoot 'r4y.toml'
 $script:StatePath = Join-Path $script:LocalRoot 'install-state.json'
@@ -445,8 +450,16 @@ function Write-Config([string]$GameDirectory, [string]$Executable) {
 
 function Get-R4YExecutable {
     $profile = if ($script:Diagnostics) { 'diag' } else { 'release' }
-    $path = Join-Path $script:Root ('target\' + $profile + '\r4y.exe')
-    if (Test-Path -LiteralPath $path -PathType Leaf) { return $path }
+    $targetRoot = Join-Path $script:Root 'target'
+    if ($env:CARGO_TARGET_DIR) {
+        if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+            $targetRoot = $env:CARGO_TARGET_DIR
+        } else {
+            $targetRoot = Join-Path $script:Root $env:CARGO_TARGET_DIR
+        }
+    }
+    $path = Join-Path $targetRoot ($profile + '\r4y.exe')
+    if (Test-Path -LiteralPath $path -PathType Leaf) { return (Resolve-Path -LiteralPath $path).ProviderPath }
     return $null
 }
 
@@ -463,7 +476,13 @@ function Build-R4Y([string]$Cargo) {
     $code = Invoke-Native $Cargo $buildArgs $script:Root
     if ($code -ne 0) { throw ('R4Y build failed with exit code ' + $code + '.') }
     $binary = Get-R4YExecutable
-    if (-not $binary) { throw 'Cargo did not produce the R4Y executable.' }
+    if (-not $binary) {
+        $expectedProfile = if ($script:Diagnostics) { 'diag' } else { 'release' }
+        $expectedPath = Join-Path $script:Root ('target\' + $expectedProfile + '\r4y.exe')
+        throw ('Cargo reported a successful build, but the R4Y executable was not found at ' + $expectedPath +
+            '. Workspace root: ' + $script:Root +
+            '. CARGO_TARGET_DIR: ' + $env:CARGO_TARGET_DIR)
+    }
     Write-Ok ('Built ' + $binary)
     return $binary
 }
@@ -501,6 +520,7 @@ function Invoke-Setup {
     $cargo = Get-Cargo
     if (-not $cargo) { throw 'Cargo was not found after prerequisite checks. Open a new terminal and rerun R4Y.' }
 
+    Write-Info ('R4Y workspace: ' + $script:Root)
     Write-Step 'Select the game folder (the installer finds the executable inside it)'
     $selection = Select-Game
     $gameDirectory = [string]$selection[0]
