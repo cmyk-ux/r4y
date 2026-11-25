@@ -527,6 +527,10 @@ impl State {
         // compute pipeline.
         if list.take_rebind() {
             (self.host_pipeline, self.host_roots[1]) = (0, 0);
+            // An internal depth copy switched the root signature. Force the
+            // descriptor heaps to be rebound before restoring one with
+            // directly-indexed sampler descriptors.
+            self.host_heaps = [usize::MAX; 2];
         }
         // Heaps first: a root signature with directly indexed heaps must be
         // set after them. Title memory's views need a view heap: ours where
@@ -580,15 +584,23 @@ impl State {
             // (`crate::twin`), with a compute pipeline: this one's again
             // (root arguments are set below).
             if list.take_rebind() {
+                // The depth-twin copy temporarily installed its own compute
+                // root signature. Rebind both heaps before restoring a root
+                // signature with direct heap indexing, and restore the
+                // matching graphics or compute signature for this stage.
+                self.host_heaps = [usize::MAX; 2];
+                self.bind_heaps(list, memory_heap);
                 // SAFETY: an open list, a live root signature and pipeline.
                 unsafe {
                     if compute {
                         l.SetComputeRootSignature(&p.root);
+                    } else {
+                        l.SetGraphicsRootSignature(&p.root);
                     }
                     l.SetPipelineState(&p.pso);
                 }
                 self.host_pipeline = p.pso.as_raw() as usize;
-                self.host_roots[1] = if compute { root } else { 0 };
+                self.host_roots[usize::from(compute)] = root;
             }
             if self.table_failed {
                 static DROPPED_TABLES: AtomicU64 = AtomicU64::new(0);
