@@ -1192,6 +1192,7 @@ fn shared_texture(
             // format and flags may differ after host-format/usage translation.
             // SAFETY: `t` owns a live D3D12 texture; GetDesc is a plain query.
             let host_desc = unsafe { t.texture.GetDesc() };
+            // SAFETY: `host` owns a live device and `host_desc` describes a live texture.
             let info = unsafe { host.device.GetResourceAllocationInfo(0, &[host_desc]) };
             SAVED.fetch_add(info.SizeInBytes, std::sync::atomic::Ordering::Relaxed);
         }
