@@ -3053,11 +3053,23 @@ impl<'a> Lower<'a> {
         flat
     }
 
-    /// This lane's original console lane number (0..63).
-    fn console_lane(&mut self) -> V {
+    /// This lane's original console lane number (0..63) and its half (0/1).
+    fn console_lane_pair(&mut self) -> (V, V) {
         let flat = self.console_flat();
-        let mask = self.s.m.i32(63);
-        self.s.m.bin(self.s.entry, Bin::And, flat, mask)
+        let entry = self.s.entry;
+        let (mask, five, one) = (
+            self.s.m.i32(63),
+            self.s.m.i32(5),
+            self.s.m.i32(1),
+        );
+        let lane = self.s.m.bin(entry, Bin::And, flat, mask);
+        let half = self.s.m.bin(entry, Bin::LShr, flat, five);
+        let half = self.s.m.bin(entry, Bin::And, half, one);
+        (lane, half)
+    }
+
+    fn console_lane(&mut self) -> V {
+        self.console_lane_pair().0
     }
 
     /// Component `c` of the thread id in the group. With console lanes, the
@@ -3202,6 +3214,150 @@ impl<'a> Lower<'a> {
             117,
             &[x, lane],
         )
+    }
+
+    /// Each 32-lane half contributes one value; both halves receive both
+    /// values through two group-shared dwords and two group barriers.
+    fn exchange(&mut self, at: usize, value: V) -> (V, V) {
+        let threads = self.s.threads.expect("console flow compute").iter().product::<u32>();
+        let zero = self.s.m.i32(0);
+        if threads <= 32 {
+            return (value, zero);
+        }
+        let (_, half) = self.console_lane_pair();
+        let slots = match self.xchg {
+            Some(slots) => slots,
+            None => {
+                let array = self.s.m.array(2, self.s.t.i32);
+                let slots = self.s.m.global("r4y_wave64_exchange", array, 3);
+                self.xchg = Some(slots);
+                slots
+            }
+        };
+        let mode = self.s.m.i32(1 | 8);
+        let own = self.s.m.element(at, slots, half);
+        self.s.m.store(at, own, value);
+        self.s.op(
+            at,
+            "barrier",
+            Attr::NoDuplicate,
+            self.s.t.void,
+            80,
+            &[mode],
+        );
+        let one = self.s.m.i32(1);
+        let low_ptr = self.s.m.element(at, slots, zero);
+        let high_ptr = self.s.m.element(at, slots, one);
+        let low = self.s.m.load(at, low_ptr);
+        let high = self.s.m.load(at, high_ptr);
+        // No next exchange may overwrite the pair until all lanes have read.
+        self.s.op(
+            at,
+            "barrier",
+            Attr::NoDuplicate,
+            self.s.t.void,
+            80,
+            &[mode],
+        );
+        (low, high)
+    }
+
+    /// Read a value from any lane of the 64-lane console wave.
+    fn console_read_lane(&mut self, value: V, lane: V) -> V {
+        let block = self.cur;
+        let (k31, k5, one, zero) = (
+            self.s.m.i32(31),
+            self.s.m.i32(5),
+            self.s.m.i32(1),
+            self.s.m.i32(0),
+        );
+        let local = self.s.m.bin(block, Bin::And, lane, k31);
+        let own = self.read_lane(value, local);
+        let (low, high) = self.exchange(block, own);
+        let half = self.s.m.bin(block, Bin::LShr, lane, k5);
+        let half = self.s.m.bin(block, Bin::And, half, one);
+        let from_low = self.s.m.cmp(block, pred::EQ, half, zero);
+        self.s.m.select(block, from_low, low, high)
+    }
+
+    /// The host wave's ballot of one lane predicate (32-lane wave: word 0).
+    fn ballot_word(&mut self, at: usize, bit: V) -> V {
+        let i32t = self.s.t.i32;
+        let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
+        let ballot = self.s.op(
+            at,
+            "waveActiveBallot",
+            Attr::NoUnwind,
+            four,
+            116,
+            &[bit],
+        );
+        self.s.flags |= flags::WAVE_OPS;
+        self.s.m.extract(at, ballot, 0)
+    }
+
+    /// Whether a predicate holds in at least one lane of the console wave.
+    fn any_lane(&mut self, mask: Bool) -> Result<V, Why> {
+        let at = self.cur;
+        let bit = self.boolean(mask, at)?;
+        let word = self.ballot_word(at, bit);
+        let (low, high) = self.exchange(at, word);
+        let any = self.s.m.bin(at, Bin::Or, low, high);
+        let zero = self.s.m.i32(0);
+        Ok(self.s.m.cmp(at, pred::NE, any, zero))
+    }
+
+    /// Recover a mask-writing instruction's SCC as a wave-wide any-lane test.
+    fn scc_bit(&mut self, value: Value) -> Result<V, Why> {
+        match self.vals.get(&value) {
+            Some(&Val::Bit(bit)) => return Ok(bit),
+            Some(&Val::Missing(why)) if why != LANE_MASK => return Err(why),
+            _ => {}
+        }
+        let block = *self.def_block.get(&value).ok_or("an SCC from the program's start")?;
+        let inst = self.x.p.blocks[block]
+            .insts
+            .iter()
+            .find(|inst| inst.writes.iter().any(|write| write.1 == value))
+            .ok_or("an SCC without its instruction")?;
+        let mask = inst
+            .write(Reg::S(EXEC))
+            .and_then(|written| self.x.st.masks.get(&written).copied())
+            .or_else(|| {
+                inst.writes
+                    .iter()
+                    .filter(|write| matches!(write.0, Reg::S(_)))
+                    .find_map(|write| self.x.st.masks.get(&write.1).copied())
+            })
+            .ok_or("an SCC the emitter did not compute")?;
+        self.any_lane(mask)
+    }
+
+    /// The branch condition used by the console: both halves take the same
+    /// edge when any lane has the tested EXEC/VCC/SCC bit.
+    fn console_branch(&mut self, block: usize) -> Result<V, Why> {
+        let inst = self.x.p.blocks[block].insts.last().ok_or("a branch")?;
+        let name = inst.name();
+        let (any, branch_when_set) = match name {
+            "s_cbranch_scc0" | "s_cbranch_scc1" => {
+                let scc = inst.read(Reg::Scc).ok_or("a branch's SCC")?;
+                (self.scc_bit(scc)?, name == "s_cbranch_scc1")
+            }
+            "s_cbranch_vccz" | "s_cbranch_vccnz"
+            | "s_cbranch_execz" | "s_cbranch_execnz" => {
+                let register = if name.contains("vcc") { crate::ir::VCC } else { EXEC };
+                let low = inst.read(Reg::S(register)).ok_or("a branch's mask")?;
+                let &mask = self.x.st.masks.get(&low).ok_or("a branch on an untracked mask")?;
+                (self.any_lane(mask)?, name.ends_with("nz"))
+            }
+            _ => return Err("a branch the console flow does not model"),
+        };
+        if branch_when_set {
+            Ok(any)
+        } else {
+            let yes = self.s.m.bool(true);
+            Ok(self.s.m.bin(self.cur, Bin::Xor, any, yes))
+        }
     }
 
     /// The float value of a register value.
