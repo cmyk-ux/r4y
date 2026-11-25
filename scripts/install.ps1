@@ -390,7 +390,13 @@ function Select-Game {
             Write-Host ('[' + ($i + 1) + '] ' + $found[$i].Name)
         }
         $choice = Read-Host 'Executable number'
-        if ($choice -match '^\d+
+        $selectedIndex = 0
+        if ([int]::TryParse([string]$choice, [ref]$selectedIndex) -and
+            $selectedIndex -ge 1 -and $selectedIndex -le $found.Count) {
+            $executable = $found[$selectedIndex - 1].FullName
+        }
+    }
+
     if (-not $executable) {
         $executable = Pick-File $directory
     }
@@ -412,7 +418,6 @@ function Select-Game {
 
     return @($directory, $executable)
 }
-
 
 function ConvertTo-TomlString([string]$Value) {
     $slash = [string][char]92
