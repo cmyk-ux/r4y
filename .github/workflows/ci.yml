@@ -57,6 +57,8 @@ jobs:
       # local, but run the structured-buffer gather path on both hardware and
       # WARP: its CPU-reference checks are valid on any supported D3D12 device.
       - name: Tests
+        env:
+          R4Y_D3D12_WARP: "1"
         run: cargo test --workspace --locked -- --skip permutes_read_the_lane_named_and_zero_from_lanes_left_out --skip wave64_split_matches_console_on_d3d12_hardware
       # Keep the skip reason visible: a green hosted-runner job is not proof
       # that the lane-by-lane D3D12 test found a suitable adapter.
