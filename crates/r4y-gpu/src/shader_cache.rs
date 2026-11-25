@@ -80,7 +80,7 @@ fn build() -> &'static [u8; 32] {
             r4y_shader::emit::heap_views(),
             r4y_shader::emit::title_views(),
             group_sync,
-            crate::host::host().map_or(Target::ANY, |host| host.wave_target),
+            crate::host::host().map_or(Target::NONE, |host| host.wave_target),
         )
     })
 }
@@ -119,7 +119,7 @@ fn key_for_target(
 /// there is one, and whether it came from there.
 pub fn host_shader(container: &[u8]) -> (Result<HostShader, String>, bool) {
     // Also covers callers that translate without first opening a cache.
-    let target = crate::host::host().map_or(Target::ANY, |host| host.wave_target);
+    let target = crate::host::host().map_or(Target::NONE, |host| host.wave_target);
     let translate = |c: &[u8]| {
         r4y_shader::emit::translate_for(c, target).map_err(|e| e.to_string())
     };
@@ -500,7 +500,7 @@ mod tests {
                 r4y_shader::emit::heap_views(),
                 r4y_shader::emit::title_views(),
                 r4y_shader::emit::group_sync(),
-                crate::host::host().map_or(Target::ANY, |host| host.wave_target),
+                crate::host::host().map_or(Target::NONE, |host| host.wave_target),
             )
         );
         // The encoding part is this file as built.
