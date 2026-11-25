@@ -24,6 +24,7 @@ const IN_HALF: &[u32] = &[
 
 const DPP_ROW_MASK: &[u32] = &[
     0x7E04_0281, // v_mov_b32 v2, 1: disabled rows must preserve this value
+    0x7E04_02FA, // first dword of the VOP_DPP instruction below
     0x3F00_E400, // v_mov_b32_dpp v2, v0: quad permute, row_mask 0x3
 ];
 
