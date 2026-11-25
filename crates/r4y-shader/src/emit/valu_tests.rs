@@ -190,6 +190,10 @@ fn run_cases(
             eprintln!("no SM 6.6 {label} device; skipped");
             continue;
         };
+        if let Some(reason) = host.shader_wave_limit(&shader.dxil) {
+            eprintln!("{label}: {reason}; hardware probe skipped");
+            continue;
+        }
         let (root, pso) = host
             .compute_pipeline(shader)
             .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
