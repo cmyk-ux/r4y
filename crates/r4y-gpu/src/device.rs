@@ -342,7 +342,6 @@ extern "system" fn check_feature_support(
                     tracing::debug!(format, error = %error, "host format support query failed");
                     return UNSUPPORTED;
                 }
-                q[0] = format;
                 q[1] = support.Support1.0;
                 q[2] = support.Support2.0;
                 S_OK
