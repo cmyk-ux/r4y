@@ -74,8 +74,8 @@ pub(crate) struct State {
     /// Graphics, compute.
     host_roots: [usize; 2],
     host_heaps: [usize; 2],
-    /// Tables made afresh in this list: (table, what it holds) → first
-    /// dynamic slot.
+    /// Tables made afresh in this list: (table, used range and contents)
+    /// → where entry 0 would lie after compacting the unused prefix.
     fresh_tables: std::collections::HashMap<(u64, u64), u32>,
     /// The dynamic slots the list holds: title heap, first, count; given
     /// back when the list is reset or released.
@@ -1150,30 +1150,34 @@ impl State {
             let Some(host) = heap.host() else {
                 continue;
             };
-            let n = entries
-                .iter()
-                .map(|u| u.table_offset_dwords / 8 + 1)
-                .max()
-                .unwrap_or(1);
-            // The table and what its entries hold (record words).
+            // Only used entries from the first on need host descriptors.
+            // This matters on a capped heap, where a table's unused prefix
+            // would otherwise consume transient slots for no shader read.
+            let (start, end) = fresh_range(
+                entries.iter().map(|u| u.table_offset_dwords / 8),
+                host.count(),
+            );
+            let n = end - start;
+            // The table and its used range and contents identify a fresh table.
             let key = {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
-                for k in 0..n {
+                (start, end).hash(&mut h);
+                for k in start..end {
                     let at = table + u64::from(k) * 32;
                     // SAFETY: a descriptor slot in title memory.
                     unsafe { (at as *const [u32; 3]).read_unaligned() }.hash(&mut h);
                 }
                 (table, h.finish())
             };
-            if let Some(&first) = self.fresh_tables.get(&key) {
+            if let Some(&base) = self.fresh_tables.get(&key) {
                 for u in entries.iter().filter(|u| u.kind != ResourceType::Cbv) {
                     let handle = table + u64::from(u.table_offset_dwords) * 4;
                     if let Some(view) = crate::descriptor::view(handle) {
                         readable(list, u, &view);
                     }
                 }
-                made.push((slot, first * 32));
+                made.push((slot, base * 32));
                 continue;
             }
             let Some(first) = host.dynamic(n) else {
@@ -1185,13 +1189,16 @@ impl State {
                 self.table_failed = true;
                 continue;
             };
-            self.fresh_tables.insert(key, first);
+            // Where entry 0 would lie: unused entries before start need no
+            // allocation, and start never lies after the first dynamic slot.
+            let base = first - start;
+            self.fresh_tables.insert(key, base);
             self.dynamic
                 .push((std::ptr::from_ref(heap) as usize, first, n));
-            // The whole range: a shader may index past the entries its
-            // used-resource list names (descriptor arrays).
-            for k in 0..n {
-                let index = first + k;
+            // Preserve the complete used interval: shaders may index entries
+            // past those named by the used-resource list (descriptor arrays).
+            for k in start..end {
+                let index = base + k;
                 let used = entries.iter().find(|u| u.table_offset_dwords / 8 == k);
                 match crate::descriptor::view(table + u64::from(k) * 32) {
                     Some(view) => {
@@ -1208,7 +1215,7 @@ impl State {
                     }
                 }
             }
-            made.push((slot, first * 32));
+            made.push((slot, base * 32));
         }
         made
     }
@@ -1873,6 +1880,15 @@ pub(crate) fn blend_factor(list: &HostList, factor: Option<&[f32; 4]>) {
     unsafe { list.list.OMSetBlendFactor(factor) };
 }
 
+/// The entries [start, end) of a freshly made table that need dynamic
+/// slots: from the first used entry to the last. Start is at most the
+/// mirrored title range, so entry offsets remain non-negative after rebasing.
+fn fresh_range(entries: impl Iterator<Item = u32> + Clone, mirrored: u32) -> (u32, u32) {
+    let start = entries.clone().min().unwrap_or(0).min(mirrored);
+    let end = entries.max().map_or(1, |last| last.saturating_add(1)).max(start + 1);
+    (start, end)
+}
+
 pub(crate) fn stencil_ref(list: &HostList, reference: u32) {
     // SAFETY: an open list.
     unsafe { list.list.OMSetStencilRef(reference) };
@@ -1885,6 +1901,21 @@ mod tests {
     use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
     use windows::Win32::Graphics::Direct3D::ID3DBlob;
     use windows::core::s;
+
+    #[test]
+    fn fresh_tables_only_allocate_the_used_interval_on_a_capped_heap() {
+        assert_eq!(fresh_range([123, 120].into_iter(), 721_469), (120, 124));
+        assert_eq!(fresh_range([0, 7].into_iter(), 721_469), (0, 8));
+        assert_eq!(fresh_range(std::iter::empty(), 4), (0, 1));
+        assert_eq!(fresh_range([120, 123].into_iter(), 4), (4, 124));
+
+        let first = 721_469;
+        let (start, end) = fresh_range([120, 123].into_iter(), 721_469);
+        let base = first - start;
+        let offset = base * 32;
+        assert_eq!(end - start, 4);
+        assert_eq!([(offset + 120 * 32) / 32, (offset + 123 * 32) / 32], [first, first + 3]);
+    }
 
     /// Reads 16 dwords 64 bytes apart from `offset` past the root view
     /// (heap index in the table) as the translated shaders do: the root

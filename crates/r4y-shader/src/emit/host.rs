@@ -225,6 +225,27 @@ impl Host {
         }
     }
 
+    /// The largest shader-visible view heap this device accepts. Probe the
+    /// console-sized heap first; NVIDIA drivers that reject it have been
+    /// measured accepting the portable one-million-descriptor limit.
+    pub fn view_heap_limit(&self) -> u32 {
+        // SAFETY: a plain descriptor-heap capability probe; the temporary
+        // heap is dropped immediately and is not bound to a command list.
+        let full = unsafe {
+            self.device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                NumDescriptors: super::HEAP_VIEWS,
+                Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                ..Default::default()
+            })
+        };
+        if full.is_ok() {
+            super::HEAP_VIEWS
+        } else {
+            super::HEAP_VIEWS_PORTABLE
+        }
+    }
+
     /// A compute pipeline; user data is root parameter 0.
     pub fn compute_pipeline(
         &self,
@@ -1353,7 +1374,7 @@ impl Host {
                 Ok(b)
             };
             let slots = match d.views.last() {
-                Some(View::NullBuffers) => super::HEAP_VIEWS as usize,
+                Some(View::NullBuffers) => super::heap_views() as usize,
                 _ => d.views.len(),
             };
             let views = heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, slots)?;
@@ -1683,7 +1704,7 @@ impl Host {
                     }
                     View::Pair => {}
                     View::NullBuffers => {
-                        let null = super::NULL_BUFFER_VIEW as usize;
+                        let null = super::null_buffer_view() as usize;
                         let (mut srv_at, mut uav_at) = (at, at);
                         srv_at.ptr += (null - i) * view_size;
                         uav_at.ptr += (null - 1 - i) * view_size;

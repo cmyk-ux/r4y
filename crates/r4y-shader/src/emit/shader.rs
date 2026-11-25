@@ -23,7 +23,43 @@ pub const MEMORY_SPACE: u32 = 2;
 /// are at least this large, the slots past their own null (`emit`, "Heap
 /// indices").
 pub const HEAP_VIEWS: u32 = 1 << 21;
+/// Portable shader-visible view-heap capacity used when a driver rejects
+/// the full console-sized heap. NVIDIA has been measured accepting exactly
+/// this many descriptors on several generations.
+pub const HEAP_VIEWS_PORTABLE: u32 = 1_000_000;
 pub const HEAP_SAMPLERS: u32 = 2048;
+
+/// The actual view-heap limit and the title-slot prefix that can be mirrored.
+/// They are set by the D3D12 host before translation/cache fingerprinting.
+static VIEW_HEAP: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(HEAP_VIEWS);
+static TITLE_VIEWS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(HEAP_VIEWS);
+
+/// The maximum physical shader-visible view heap the host can create.
+pub fn heap_views() -> u32 {
+    VIEW_HEAP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The title-descriptor prefix kept separate from transient host descriptors.
+pub fn title_views() -> u32 {
+    TITLE_VIEWS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Sets the physical view-heap limit and the title prefix before shaders are
+/// translated. Three final slots stay outside the title prefix for the null
+/// UAV, null SRV and the clamped sentinel index.
+pub fn set_view_heap(views: u32, title: u32) {
+    let views = views.clamp(4, HEAP_VIEWS);
+    let title = title.min(views - 3);
+    VIEW_HEAP.store(views, std::sync::atomic::Ordering::Relaxed);
+    TITLE_VIEWS.store(title, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The host's null raw buffer SRV; the null raw UAV is one slot below it.
+pub fn null_buffer_view() -> u32 {
+    heap_views() - 2
+}
 /// The heap index of the host's null raw buffer view (the null raw
 /// unordered access view at the index below), read instead of a slot that
 /// holds no buffer view where a shader reads one at an index it computes
@@ -456,7 +492,7 @@ impl Shader {
         self.nonuniform_handles += u32::from(nonuniform);
         // An index past the host's heap faults the device (a console shader
         // reads whatever memory follows its heap): the last slot instead.
-        let last = self.m.i32(if sampler { HEAP_SAMPLERS } else { HEAP_VIEWS } - 1);
+        let last = self.m.i32(if sampler { HEAP_SAMPLERS } else { heap_views() } - 1);
         let over = self.m.cmp(block, pred::IUGT, index, last);
         let index = self.m.select(block, over, last, index);
         let (s, n) = (self.m.bool(sampler), self.m.bool(nonuniform));

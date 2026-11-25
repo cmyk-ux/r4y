@@ -131,6 +131,8 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
 /// host descriptions).
 fn tag(blob: &[u8]) -> String {
     let limit = r4y_shader::emit::loop_limit().to_le_bytes();
+    let views = r4y_shader::emit::heap_views().to_le_bytes();
+    let title = r4y_shader::emit::title_views().to_le_bytes();
     let translator = r4y_shader::SOURCE_HASH.as_bytes();
     let mut h = blake3::Hasher::new();
     for part in [
@@ -138,6 +140,8 @@ fn tag(blob: &[u8]) -> String {
         translator,
         include_bytes!("../shader_cache.rs"),
         &limit,
+        &views,
+        &title,
         include_bytes!("host.rs"),
         include_bytes!("library.rs"),
     ] {

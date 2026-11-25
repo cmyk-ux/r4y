@@ -30,6 +30,9 @@ static MISSES: AtomicU64 = AtomicU64::new(0);
 /// Keeps translated shaders in a folder of `dir` from now on: the folder
 /// of this translator, `None` if it cannot be opened.
 pub fn use_shader_cache(dir: PathBuf) -> Option<PathBuf> {
+    // Host capabilities affect translated heap indices and must be known
+    // before the cache directory fingerprint is computed.
+    let _ = crate::host::host();
     let dir = dir.join(&blake3::Hash::from(*build()).to_hex()[..16]);
     match Cache::open(&dir) {
         Ok(cache) => {
@@ -64,24 +67,28 @@ fn build() -> &'static [u8; 32] {
                 "R4Y_SHADER_LOOP_LIMIT: translated loops stop sooner"
             );
         }
-        key(r4y_shader::SOURCE_HASH, ENCODING, limit)
+        key(r4y_shader::SOURCE_HASH, ENCODING, limit, r4y_shader::emit::heap_views(), r4y_shader::emit::title_views())
     })
 }
 
 /// This file, whose `encode` and `decode` define the entries.
 const ENCODING: &[u8] = include_bytes!("shader_cache.rs");
 
-fn key(translator: &str, encoding: &[u8], limit: u32) -> [u8; 32] {
+fn key(translator: &str, encoding: &[u8], limit: u32, views: u32, title: u32) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(translator.as_bytes());
     h.update(blake3::hash(encoding).as_bytes());
     h.update(&limit.to_le_bytes());
+    h.update(&views.to_le_bytes());
+    h.update(&title.to_le_bytes());
     *h.finalize().as_bytes()
 }
 
 /// The translation of a console shader container, from the cache when
 /// there is one, and whether it came from there.
 pub fn host_shader(container: &[u8]) -> (Result<HostShader, String>, bool) {
+    // Also covers callers that translate without first opening a cache.
+    let _ = crate::host::host();
     let translate = |c: &[u8]| r4y_shader::emit::translate(c).map_err(|e| e.to_string());
     match CACHE.get() {
         Some(cache) => cached(cache, build(), container, translate),
@@ -428,17 +435,28 @@ mod tests {
     /// written before it is read.
     #[test]
     fn the_key_covers_translator_encoding_and_settings() {
-        let k = key("0123456789abcdef", b"encoding", 1 << 20);
-        assert_eq!(k, key("0123456789abcdef", b"encoding", 1 << 20));
-        assert_ne!(k, key("0123456789abcdee", b"encoding", 1 << 20));
-        assert_ne!(k, key("0123456789abcdef", b"encoding.", 1 << 20));
-        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 19));
+        let views = r4y_shader::emit::HEAP_VIEWS;
+        let k = key("0123456789abcdef", b"encoding", 1 << 20, views, views);
+        assert_eq!(k, key("0123456789abcdef", b"encoding", 1 << 20, views, views));
+        assert_ne!(k, key("0123456789abcdee", b"encoding", 1 << 20, views, views));
+        assert_ne!(k, key("0123456789abcdef", b"encoding.", 1 << 20, views, views));
+        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 19, views, views));
+        assert_ne!(
+            k,
+            key("0123456789abcdef", b"encoding", 1 << 20, r4y_shader::emit::HEAP_VIEWS_PORTABLE, 721_469)
+        );
+        assert_ne!(
+            k,
+            key("0123456789abcdef", b"encoding", 1 << 20, r4y_shader::emit::HEAP_VIEWS_PORTABLE, 721_468)
+        );
         assert_eq!(
             *build(),
             key(
                 r4y_shader::SOURCE_HASH,
                 ENCODING,
-                r4y_shader::emit::loop_limit()
+                r4y_shader::emit::loop_limit(),
+                r4y_shader::emit::heap_views(),
+                r4y_shader::emit::title_views(),
             )
         );
         // The encoding part is this file as built.
