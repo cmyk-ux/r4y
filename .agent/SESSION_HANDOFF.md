@@ -806,3 +806,85 @@ Therefore this run does **not** validate the lane-by-lane Wave64 D3D12 test on a
 2. Continue runtime blocker triage using the already-recorded crash-context findings in section 10: title-side access violation is a write to null/unmapped address at `r4y-image-...+0x23cf683`; memory pressure was high but is not proven causal. Obtain or inspect the adjacent register/unwind frames from the exact `crashes.log` report before assigning a subsystem.
 3. Do not return to clamp hoisting yet. Scratch/count correctness, WARP, Clippy, diagnostics and release builds have passed; real title GPU timing and RTX 3070 A/B are still needed before performance changes.
 4. Keep the AMD helper-lane/quad semantics audit as a separate item. Do not implement a broad helper-lane change solely on the AMD report; create focused tests and establish a failing NVIDIA/title case first.
+
+
+## 14. Crash diagnostics, pipeline wave-size logging and next GPU timing run (2026-11-25)
+
+This section supersedes the older branch/CI snapshots above.
+
+### CI validation
+
+- Crash reporter instrumentation commit: `240e0c14b22e7c5e3209c53042c7a7dc212580c7`.
+- CI run #187: https://github.com/cmyk-ux/r4y/actions/runs/45617709149 — **success** on that exact SHA. Clippy, diagnostics Clippy, build, workspace tests and the hardware-test step all completed successfully.
+- New pipeline WaveSize logging commit: `6983067d76c8ad81a910ca379420d5dcefd9d228`.
+- CI run #188: https://github.com/cmyk-ux/r4y/actions/runs/45618595560 — **success** on that exact SHA.
+- Latest verified PR head at this addendum: `6983067d76c8ad81a910ca379420d5dcefd9d228`, PR #16 open, mergeable, 170 commits ahead and zero behind `main`.
+
+Run #187/#188 results:
+- Normal Clippy: passed.
+- Diagnostics/all-features Clippy: passed.
+- Main/release build: passed.
+- Workspace: `214 passed; 0 failed; 2 ignored; 2 filtered out`.
+- The dynamic heap stride WARP regression, gather regression and new crash reporter tests pass.
+- The separate D3D12 Wave64 test executable reports success but explicitly skips because the hosted adapter reports neither 32- nor 64-lane waves. This is **not** an RTX 3070 hardware pass.
+
+### Crash reporter enhancement
+
+File: `crates/r4y-loader/src/crash.rs`, commit `240e0c14...`.
+
+- Access-violation reports now preserve up to 15 bytes at the faulting instruction address when it belongs to a loaded image.
+- Each unwind frame now attempts `RtlLookupFunctionEntry` and logs the runtime-function RVA interval, offset within the function, and unwind-info RVA.
+- Added a test proving a function pointer into the test binary resolves to a valid x64 runtime-function range.
+- This should make the next Diagnostics run's title-side null-write report more actionable even without a PDB. No title executable, game asset or minidump is needed.
+
+### Per-shader DXIL wave-size telemetry
+
+File: `crates/r4y-gpu/src/pipeline.rs`, commit `6983067d...`.
+
+Each successful `shader translated` event now logs:
+- `dxil_wave_size`: fixed WaveSize parsed from the emitted DXIL PSV0, or `None` if no fixed size is declared.
+- `host_wave_target`: the actual D3D12 adapter wave-size range that the translator used.
+
+This is observation only: it does not change emitted DXIL, pipeline compatibility or the translator's Wave64 fallback decisions. Use the next log to check whether any shader still emits a fixed Wave64 declaration on the RTX 3070's Wave32 target.
+
+### Important distinction between two available log sources
+
+- The Library file `r4y-run.log` (`turn769file0`) begins at `2026-11-25T01:56:24Z` and crashes at `01:58:44Z` (22:56–22:58 local time on 2026-11-24). Its startup has no `host wave sizes` line. It is an older run and must **not** be used as evidence that the later target-aware Diagnostics build still emitted Wave64 PSOs.
+- The newer correct Diagnostics run described in section 10 is the one that logged `lanes_min=32 lanes_max=32`, freshly translated and created the two compute pipelines `88994c3496045f51` and `13dfdd3b1136e407`, then bound both on frames 1168 and 1186 before the title-side crash at 09:37:38.
+- No separate full log or crashcontext file for that newer run is currently available in the Library. The handoff's section 10 contains the user-provided evidence. Do not conflate it with `turn769file0`.
+
+### Correct next diagnostic run
+
+The existing timing mode already isolates per-command-list GPU time; no second timing subsystem is needed:
+- `R4Y_GPU_TIMING=1` makes `Host::execute` submit and fence each list separately.
+- Lists taking more than 50 ms log `slow host list` and up to six `slow list command` entries with GPU timestamp durations.
+- Without this flag, all lists are submitted as one group; the observed `slow host submission ms=5572 lists=9` cannot identify which list or command caused the delay.
+
+The previous correct Diagnostics runtime explicitly reported `GPU-based validation on`. That is controlled independently by `R4Y_D3D12_GBV`; it is enabled only when that environment variable is present. For the next performance/queue attribution run, remove GBV while retaining the normal default console-flow mode. Do **not** combine this first run with `R4Y_WAVE64_CONSOLE_FLOW=0`, because that would change which shaders are accepted and confound the timing comparison.
+
+PowerShell for the next single run:
+
+```powershell
+Remove-Item Env:R4Y_D3D12_GBV -ErrorAction SilentlyContinue
+Remove-Item Env:R4Y_WAVE64_CONSOLE_FLOW -ErrorAction SilentlyContinue
+$env:R4Y_GPU_TIMING = "1"
+.4y-run.cmd
+```
+
+Keep the user's existing Diagnostics profile selection. Do not rebuild release if the installer selects diagnostics; use the installed profile's build path from sections 7–10.
+
+After that run, collect only:
+1. All `host wave sizes` and `shader translated` lines containing `dxil_wave_size` and `host_wave_target`.
+2. Each `slow host list` and its following `slow list command` rows.
+3. The `slow host submission`, `host pipeline refused`, `device removed`/DRED lines if any.
+4. The first-chance/unhandled crash block, including the new `instruction bytes` and `function RVA` annotations.
+
+Interpretation:
+- A list consistently taking multiple seconds points to a specific GPU pass; use its pipeline and command markers to isolate the offending shader or resource path.
+- If each list is short but the total frame stalls, investigate CPU submission/preparation/fence scheduling rather than one long GPU dispatch.
+- If the title still crashes with GBV off and no device removal, keep the title watchdog/AV distinct from D3D12 device loss.
+- After command attribution, only then perform a separate A/B with `R4Y_WAVE64_CONSOLE_FLOW=0` if the slow/failing work actually contains console-flow-dependent Wave64 compute shaders.
+
+### No new production behavior change
+
+The last code change only adds the two diagnostic fields to shader translation logs. The scratch indirect clamp and dynamic heap stride fixes remain unchanged and validated by CI. Do not start clamp hoisting or broad helper-lane changes before the next title run identifies the actual GPU bottleneck.
