@@ -1334,7 +1334,7 @@ mod tests {
 
 #[cfg(test)]
 mod host_wave_target_tests {
-    use super::{Container, Target, emit_for, emit_for_with_console_flow};
+    use super::{Container, Target, emit_for_with_console_flow};
     use crate::native::{ComputeIo, HwStage, NativeProgram, StageIo};
     use crate::{ShaderError, io, ir, resource, structure};
 
