@@ -5394,6 +5394,9 @@ impl<'a> Lower<'a> {
                 Ok(self.s.m.select(self.cur, cond, set, clear))
             }
             Source::LanePhi { block, args } => {
+                if self.console_cf {
+                    return Err(LANE_PHI_IN_CONSOLE_FLOW);
+                }
                 // Each predecessor computes its heap index at its end (what
                 // it reads is there: the dwords are, on that edge); the join
                 // picks the one of the edge the lane came by. An edge no
