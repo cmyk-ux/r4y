@@ -6377,13 +6377,14 @@ impl<'a> Lower<'a> {
             "v_readfirstlane_b32" if self.console_cf => {
                 // The first lane in EXEC across the whole 64-lane console wave.
                 let value = s(self, 0)?;
-                let word = |lower: &mut Self, code: u8| -> Result<V, Why> {
-                    match lower.get(inst.read(Reg::S(code)).ok_or(LANE_MASK)?)? {
-                        Val::I32(value) => Ok(value),
-                        _ => Err(LANE_MASK),
-                    }
-                };
-                let (low, high) = (word(self, EXEC)?, word(self, EXEC + 1)?);
+                let low_mask = inst.read(Reg::S(EXEC)).ok_or(LANE_MASK)?;
+                let high_mask = inst.read(Reg::S(EXEC + 1)).ok_or(LANE_MASK)?;
+                // EXEC is tracked as a per-lane boolean, not as an ordinary
+                // scalar value. Reconstruct both dwords with ballots.
+                let (low, high) = (
+                    self.mask_dword(low_mask)?,
+                    self.mask_dword(high_mask)?,
+                );
                 let first_low = self.s.op(
                     c,
                     "unaryBits.i32",
