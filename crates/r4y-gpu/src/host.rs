@@ -459,7 +459,7 @@ pub(crate) struct HostList {
 #[derive(Default)]
 struct IndirectArgs {
     current: Option<(ID3D12Resource, u64, u32)>,
-    retired: Vec<ID3D12Resource>,
+    retired: Vec<(ID3D12Resource, u32)>,
 }
 
 /// Timestamps per list (diagnostics); commands past them are not timed.
@@ -1219,6 +1219,39 @@ impl HostList {
             // Keep the Arc<Shadow> entries alive until reset(), which is
             // called only after the submission fence has completed.
         }
+        // Indirect scratch buffers use explicit transitions, so they do not
+        // decay to COMMON after submission. Return every buffer used by this
+        // recording to COMMON before close: the closed list may be submitted
+        // again until the title resets it.
+        {
+            let mut scratch = self.indirect_args.lock().unwrap_or_else(|e| e.into_inner());
+            let mut barriers = Vec::with_capacity(scratch.retired.len() + 1);
+            for (buffer, state) in &mut scratch.retired {
+                if *state != 0 {
+                    barriers.push(transition(
+                        buffer,
+                        D3D12_RESOURCE_STATES(*state as i32),
+                        D3D12_RESOURCE_STATE_COMMON,
+                    ));
+                    *state = 0;
+                }
+            }
+            if let Some((buffer, _, state)) = scratch.current.as_mut()
+                && *state != 0
+            {
+                barriers.push(transition(
+                    buffer,
+                    D3D12_RESOURCE_STATES(*state as i32),
+                    D3D12_RESOURCE_STATE_COMMON,
+                ));
+                *state = 0;
+            }
+            if !barriers.is_empty() {
+                // SAFETY: the list is open and all scratch buffers remain
+                // retained by this HostList through the submission fence.
+                unsafe { self.list.ResourceBarrier(&barriers) };
+            }
+        }
         #[cfg(feature = "diagnostics")]
         if let Some((heap, back)) = self.stamps() {
             let count = (self.notes.lock().unwrap_or_else(|e| e.into_inner()).len() as u32).min(STAMPS - 1);
@@ -1723,8 +1756,8 @@ impl HostList {
         if scratch.current.as_ref().map_or(true, |(_, capacity, _)| *capacity < size) {
             let buffer = host()?.uav_buffer(size)?;
             name(&buffer, || format!("indirect argument scratch {size:#x}"));
-            if let Some((old, _, _)) = scratch.current.take() {
-                scratch.retired.push(old);
+            if let Some((old, _, state)) = scratch.current.take() {
+                scratch.retired.push((old, state));
             }
             scratch.current = Some((buffer, size, 0));
         }
