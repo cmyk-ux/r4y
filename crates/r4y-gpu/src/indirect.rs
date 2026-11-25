@@ -27,8 +27,15 @@ use crate::host::{HostList, host};
 use crate::shadow::Shadow;
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=4, b0), SRV(t0), SRV(t1), UAV(u0), UAV(u1)"
-cbuffer Record : register(b0) { uint kind; uint stride; uint records; uint has_count; };
+#define RS "RootConstants(num32BitConstants=6, b0), SRV(t0), SRV(t1), UAV(u0), UAV(u1)"
+cbuffer Record : register(b0) {
+    uint kind;
+    uint stride;
+    uint records;
+    uint has_count;
+    uint args_offset;
+    uint count_offset;
+};
 ByteAddressBuffer args : register(t0);
 ByteAddressBuffer count_buf : register(t1);
 RWByteAddressBuffer dst_args : register(u0);
@@ -63,10 +70,10 @@ void main(uint3 id : SV_DispatchThreadID) {
     // ExecuteIndirect also honors this count. The helper must honor it too:
     // records beyond the active count are not read or copied.
     uint active = records;
-    if (has_count != 0) active = min(active, count_buf.Load(0));
+    if (has_count != 0) active = min(active, count_buf.Load(count_offset));
     if (id.x >= active) return;
 
-    uint at = id.x * stride;
+    uint at = args_offset + id.x * stride;
     uint cost;
     if (kind <= 1) {
         // Draws: vertex or index count, then instances.
@@ -216,15 +223,32 @@ fn validate_layout(
     if records > MAX_RECORDS
         || stride < min_stride(kind)?
         || !stride.is_multiple_of(4)
-        || !args_gpu.is_multiple_of(4)
+        // Root ByteAddressBuffer descriptors are anchored at the allocation
+        // base, which must meet raw-buffer alignment (16 bytes).
+        || !args_gpu.is_multiple_of(16)
     {
         return None;
     }
-    if count_gpu.is_some_and(|address| !address.is_multiple_of(4)) {
+    if count_gpu.is_some_and(|address| !address.is_multiple_of(16)) {
         return None;
     }
     let bytes = u64::from(stride).checked_mul(u64::from(records))?;
     (bytes <= u64::from(u32::MAX)).then_some(bytes)
+}
+
+fn root_buffer(
+    shadow: &Arc<Shadow>,
+    address: u64,
+    bytes: u64,
+) -> Option<(u64, u32)> {
+    let (start, len) = shadow.range();
+    let base = shadow.gpu(start);
+    let offset = address.checked_sub(base)?;
+    let end = offset.checked_add(bytes)?;
+    if end > len || end > u64::from(u32::MAX) {
+        return None;
+    }
+    Some((base, u32::try_from(offset).ok()?))
 }
 
 /// Records one non-destructive clamp dispatch against raw GPU virtual
@@ -235,10 +259,19 @@ fn record_clamp(
     dst: &ID3D12Resource,
     budget: u64,
     args_gpu: u64,
+    args_offset: u32,
     count_gpu: Option<u64>,
+    count_offset: u32,
     (kind, stride, records): (u32, u32, u32),
 ) -> bool {
-    if validate_layout((kind, stride, records), args_gpu, count_gpu).is_none() {
+    let Some(bytes) = validate_layout((kind, stride, records), args_gpu, count_gpu) else {
+        return false;
+    };
+    if !args_offset.is_multiple_of(4)
+        || !count_offset.is_multiple_of(4)
+        || u64::from(args_offset).checked_add(bytes).is_none_or(|end| end > u64::from(u32::MAX))
+        || u64::from(count_offset) + 4 > u64::from(u32::MAX)
+    {
         return false;
     }
     // SAFETY: live D3D12 buffer resources.
@@ -246,14 +279,21 @@ fn record_clamp(
     if !budget.is_multiple_of(4) || !dst_gpu.is_multiple_of(4) {
         return false;
     }
-    let constants = [kind, stride, records, u32::from(count_gpu.is_some())];
+    let constants = [
+        kind,
+        stride,
+        records,
+        u32::from(count_gpu.is_some()),
+        args_offset,
+        count_offset,
+    ];
     // SAFETY: an open list, a compatible root signature/pipeline, and live
     // source, optional count, destination and budget buffer GPU addresses.
     unsafe {
         l.ResourceBarrier(&[uav_barrier()]);
         l.SetComputeRootSignature(&c.root);
         l.SetPipelineState(&c.pso);
-        l.SetComputeRoot32BitConstants(0, 4, constants.as_ptr().cast(), 0);
+        l.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
         l.SetComputeRootShaderResourceView(1, args_gpu);
         l.SetComputeRootShaderResourceView(2, count_gpu.unwrap_or(args_gpu));
         l.SetComputeRootUnorderedAccessView(3, dst_gpu);
@@ -276,8 +316,21 @@ pub(crate) fn bound(
     count: Option<(&Arc<Shadow>, u64)>,
     (kind, stride, records): (u32, u32, u32),
 ) -> Option<ID3D12Resource> {
-    let count_gpu = count.map(|(counter, address)| counter.gpu(address));
-    let bytes = validate_layout((kind, stride, records), gpu, count_gpu)?;
+    let (_, args_len) = shadow.range();
+    let (args_gpu, args_offset) = root_buffer(shadow, gpu, 0)?;
+    let count_binding = count.map(|(counter, address)| {
+        let gpu = counter.gpu(address);
+        root_buffer(counter, gpu, 4)
+    });
+    let (count_gpu, count_offset) = match count_binding {
+        Some(Some((base, offset))) => (Some(base), offset),
+        Some(None) => return None,
+        None => (None, 0),
+    };
+    let bytes = validate_layout((kind, stride, records), args_gpu, count_gpu)?;
+    if u64::from(args_offset).checked_add(bytes).is_none_or(|end| end > args_len) {
+        return None;
+    }
     let c = clamp()?;
     let budget = list.budget()?;
     let dst = list.indirect_scratch(bytes)?;
@@ -293,8 +346,10 @@ pub(crate) fn bound(
         &list.list,
         &dst,
         budget,
-        gpu,
+        args_gpu,
+        args_offset,
         count_gpu,
+        count_offset,
         (kind, stride, records),
     ) {
         return None;
@@ -334,6 +389,9 @@ mod tests {
         assert!(super::SOURCE.contains("if (id.x >= active) return"));
         assert!(super::SOURCE.contains("ByteAddressBuffer args : register(t0)"));
         assert!(super::SOURCE.contains("RWByteAddressBuffer dst_args : register(u0)"));
+        assert!(super::SOURCE.contains("uint args_offset;"));
+        assert!(super::SOURCE.contains("args_offset + id.x * stride"));
+        assert!(super::SOURCE.contains("count_buf.Load(count_offset)"));
         assert!(
             !super::SOURCE
                 .lines()
@@ -356,8 +414,13 @@ mod tests {
         assert_eq!(super::min_stride(10), Some(12));
         assert_eq!(super::min_stride(99), None);
         assert_eq!(super::validate_layout((0, 12, 2), 0x1000, None), None);
-        assert_eq!(super::validate_layout((0, 16, 2), 0x1002, None), None);
-        assert_eq!(super::validate_layout((0, 16, 2), 0x1000, Some(0x2002)), None);
+        assert_eq!(super::validate_layout((0, 16, 2), 0x1004, None), None);
+        assert_eq!(super::validate_layout((0, 16, 2), 0x1000, Some(0x2004)), None);
+        assert_eq!(super::root_buffer(
+            &test_shadow(0x4000, 0x1000),
+            0x4024,
+            16,
+        ), Some((0x4000, 0x24)));
     }
 
     #[test]
