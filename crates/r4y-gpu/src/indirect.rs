@@ -236,6 +236,15 @@ fn validate_layout(
     (bytes <= u64::from(u32::MAX)).then_some(bytes)
 }
 
+fn root_offset(base: u64, len: u64, address: u64, bytes: u64) -> Option<u32> {
+    let offset = address.checked_sub(base)?;
+    let end = offset.checked_add(bytes)?;
+    if end > len || end > u64::from(u32::MAX) {
+        return None;
+    }
+    u32::try_from(offset).ok()
+}
+
 fn root_buffer(
     shadow: &Arc<Shadow>,
     address: u64,
@@ -243,12 +252,7 @@ fn root_buffer(
 ) -> Option<(u64, u32)> {
     let (start, len) = shadow.range();
     let base = shadow.gpu(start);
-    let offset = address.checked_sub(base)?;
-    let end = offset.checked_add(bytes)?;
-    if end > len || end > u64::from(u32::MAX) {
-        return None;
-    }
-    Some((base, u32::try_from(offset).ok()?))
+    Some((base, root_offset(base, len, address, bytes)?))
 }
 
 /// Records one non-destructive clamp dispatch against raw GPU virtual
@@ -416,11 +420,9 @@ mod tests {
         assert_eq!(super::validate_layout((0, 12, 2), 0x1000, None), None);
         assert_eq!(super::validate_layout((0, 16, 2), 0x1004, None), None);
         assert_eq!(super::validate_layout((0, 16, 2), 0x1000, Some(0x2004)), None);
-        assert_eq!(super::root_buffer(
-            &test_shadow(0x4000, 0x1000),
-            0x4024,
-            16,
-        ), Some((0x4000, 0x24)));
+        assert_eq!(super::root_offset(0x4000, 0x1000, 0x4024, 16), Some(0x24));
+        assert_eq!(super::root_offset(0x4000, 0x1000, 0x4FFF, 2), None);
+        assert_eq!(super::root_offset(0x4000, 0x1000, 0x3FFF, 4), None);
     }
 
     #[test]
