@@ -237,7 +237,7 @@ fn create() -> windows::core::Result<Host> {
                 lanes_max: options.WaveLaneCountMax,
             }
         } else {
-            r4y_shader::emit::Target::ANY
+            r4y_shader::emit::Target::NONE
         };
         tracing::info!(
             lanes_min = wave_target.lanes_min,
@@ -314,6 +314,7 @@ fn create() -> windows::core::Result<Host> {
         // host chooses (the RX 6700 XT does, WARP does not).
         let shader_host = r4y_shader::emit::host::Host {
             device: device.clone(),
+            wave_target: Some(wave_target),
         };
         // Discover the real shader-visible view-heap capacity before the
         // shader cache fingerprints or translates any title program.
