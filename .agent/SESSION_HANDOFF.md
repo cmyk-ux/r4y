@@ -393,3 +393,41 @@ Select-String -LiteralPath $path -Pattern 'DXGI_ERROR_DEVICE|DEVICE_HUNG|DEVICE_
 \`\`\`
 
 This example is a starting point, not a fixed template: change the patterns to match the actual open question. The previous broad 900-line extraction was excessive and should not be repeated.
+
+
+## 9. Post-installer runtime test — Wave64 executable/profile mismatch investigation (2026-11-25)
+
+The user ran the affected title after the installer fix. Their checkout reported branch \`feature/wave64-host-target\`, HEAD \`a24552a\`.
+
+### New log facts
+
+From \`%LOCALAPPDATA%\\R4Y\\logs\\r4y-run.log\`:
+
+- Both target compute shaders translate from disk cache (\`cached=true\`) but their host pipeline creation is rejected with \`0x80070057\`:
+  - \`13dfdd3b1136e407\`
+  - \`88994c3496045f51\`
+- Both are later bound and their dispatches are dropped for lack of a host pipeline. Observed per-frame drop reports: 0.5/frame and 0.1/frame, later 5.0/frame for the first hash.
+- 168 D3D12 debug messages say a shader requires WaveSize 64 while the device max is 32.
+- There are 136 \`host pipeline refused\` records. An attempted PowerShell parser returned zero hashes even though raw lines visibly contain \`shaders=[compute <16-hex-hash>]\`; treat this as an extraction-script failure, not evidence of absent hashes. Retry with a simpler parser and first print a few raw refusal lines.
+- The searched startup markers \`host wave sizes\` and \`the host has no 64-lane waves\` are absent from this log.
+- Four GPU-Based Validation warnings again report Texture2D expected vs Texture1D in descriptor heap slot 0, with pixel shaders \`c0a7fe77b1862e10\`, \`0d1575a396dfe513\`, and \`280967ad158cee0b\`.
+- No matching device-removal / device-hung / DRED lines were returned by the focused search. This means no such diagnostic was observed in the excerpted log, not proof that none occurred outside the captured file.
+- GPU-Based Validation is enabled; the 0.6 FPS / ~1.7 s frame observed in the same interval is not representative performance.
+
+### Critical discrepancy: selected profile may be stale
+
+The checked-out source on PR #16 contains an unconditional \`tracing::info!(..., "host wave sizes")\` immediately after D3D12 OPTIONS1 is queried in \`crates/r4y-gpu/src/host.rs\`. It also warns if the host cannot run 64-lane waves. The runtime log contains D3D12 host activity and debug-layer messages but neither startup marker, while still showing fixed-Wave64 shader creation failures.
+
+The launch path in \`r4y-run.cmd\` invokes \`scripts/install.ps1 --launch\`. \`Invoke-Launch\` reads \`%LOCALAPPDATA%\\R4Y\\install-state.json\`; if \`profile=diag\`, it launches \`target\\diag\\r4y.exe\`, otherwise \`target\\release\\r4y.exe\`. The installer's \`Build-R4Y\` uses:
+- diagnostics: \`cargo build --profile diag --locked -p r4y --features diagnostics\`
+- release: \`cargo build --release --locked -p r4y\`
+
+Therefore, a previous recommendation to build only \`--release\` does **not** refresh the executable actually launched when the persisted installer profile is \`diag\`. The current log explicitly reports \`GPU-based validation on\`, which strongly suggests a diagnostics binary/profile. It is not yet proven which binary's timestamp/profile was used; inspect \`install-state.json\` and both target binary timestamps, then rebuild the selected profile before drawing conclusions about the Wave64 implementation.
+
+### Next actions
+
+1. Have the user inspect \`install-state.json\` (\`profile\`) and \`target\\diag\\r4y.exe\` / \`target\\release\\r4y.exe\` timestamps.
+2. Rebuild the profile actually selected by the installer; for \`diag\`, use \`cargo build --profile diag --locked -p r4y --features diagnostics\`. Then relaunch through \`r4y-run.cmd\`.
+3. First verify that the new log contains \`host wave sizes lanes_min=32 lanes_max=32\` (or the actual reported values) and the expected no-64-lane warning. Only then assess remaining Wave64 shader failures.
+4. Re-check the two target hashes and all refusal hashes using a corrected extraction script. Do not treat shader-cache hits as proof that the currently checked-in translator generated those cache entries until the selected binary/cache fingerprint is verified.
+5. Keep slot-zero SRV mismatch and descriptor virtualization as independent investigations; do not conflate them with Wave64 or the stale-binary/profile concern.
