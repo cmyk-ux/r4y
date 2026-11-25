@@ -480,3 +480,38 @@ After receiving crashcontext evidence, correlate the crashing subsystem/thread w
 - Local test checkout: feature/wave64-host-target, HEAD a24552a.
 - PR #16 remains open. Its intended runtime regression check now has materially improved evidence: the two named pipelines create and bind on the RTX 3070. Do not merge until the new crash is understood or the user explicitly elects to merge with the remaining limitation documented.
 - Slot-zero SRV Texture2D-vs-Texture1D mismatch persisted in the earlier diagnostics log and remains a separate issue; the newest pasted extraction did not include the GBV pattern, so its status on this exact run is unknown.
+
+
+### Crash artifact path correction and captured exception details (2026-11-25)
+
+Correction to the previous next-step note: the game's T: drive is a virtual title filesystem mount, not the user's host T: drive. apps/r4y/src/run.rs establishes:
+- temp = cfg.data_subdir("7952987A/temp") for TitleID 7952987A.
+- r4y_hle::modules::files::mount_at('T', &temp) maps title T: to that host directory.
+- r4y_loader::log_crashes_to(temp.with_file_name("crashes.log")) saves R4Y exception reports to a sibling file, <data_dir>/7952987A/crashes.log.
+- Default data root is %LOCALAPPDATA%\R4Y\data (unless R4Y_DATA_DIR or [paths].data_dir overrides it; config resolution is in crates/r4y-core/src/config.rs).
+
+Thus the expected host paths with the generated default config are:
+- Crash context: %LOCALAPPDATA%\R4Y\data\7952987A\temp\r4y-20261125-063738-20352.crash.log
+- R4Y exception stack log: %LOCALAPPDATA%\R4Y\data\7952987A\crashes.log
+
+The previous request to inspect literal host path T:\r4y-... was incorrect because it treated the guest mount as a host volume. Correct future log collection accordingly.
+
+### Captured fatal exception details
+
+The user's latest extraction already contains:
+- First-chance and unhandled exception: 0xc0000005, access violation, write to 0x0, reported by R4Y as nothing mapped there.
+- Faulting PC: r4y-image-b99f876b74d4a77f.dll+0x23cf683.
+- crates/r4y-loader/src/crash.rs::report() logs the full general-purpose registers and up to 40 unwound frames immediately after the exception line. The user's pattern-only extraction omitted these adjacent lines; the R4Y run log already has them. Next extraction must request a small line window around both R4Y: first-chance exception and R4Y: unhandled exception, not just matching lines.
+- memory_at(0) calls VirtualQuery and reports nothing mapped there for MEM_FREE; it is not an OOM classification. Treat this as a null/unmapped write access violation. The offset is within the prepared title image (r4y-image-...), but do not infer its function/cause until the registers and stack frames are read.
+- The title Breakpad context is expected in the mapped title temp directory, and R4Y's own exception report is expected in sibling crashes.log.
+
+Working-set evidence preceding the crash:
+- copystat reports working set rising from ~6,852 MB at 09:35:04 to ~17,292 MB at 09:37:01, with several snapshots around 16-17 GB.
+- Breakpad reports memory.load_percent=92, system.memory.free=2604432, system.memory.total=33475460; units are not explicitly documented in the crash excerpt. This suggests significant system memory pressure, but does not prove the null write was caused by memory exhaustion. Do not conflate the AV with OOM.
+
+Next user-facing extraction:
+1. Read the configured data root (generated default %LOCALAPPDATA%\R4Y\data; account for R4Y_DATA_DIR or [paths].data_dir if customized).
+2. Check existence and metadata of the exact host paths above.
+3. Print the head/tail and exception/stack-related lines of the title crashcontext if present, plus the last ~120 lines of crashes.log.
+4. From r4y-run.log, emit roughly 12 lines before and 45 after the first-chance/unhandled exception lines, preserving line numbers. This should expose all register values and unwind frames already emitted by R4Y.
+5. Do not use a PowerShell if block followed by else pasted separately into an interactive prompt. Use a single complete script block or independent if without a detached else.
