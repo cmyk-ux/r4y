@@ -116,17 +116,27 @@ impl Shader {
                 let ms = started.elapsed().as_millis() as u64;
                 let (user_ms, kernel_ms) = thread_cpu_since(cpu);
                 match &done {
-                    Ok(t) => tracing::info!(
-                        stage = self.stage,
-                        hash = %self.hash,
-                        user_data = t.host.user_data.len(),
-                        samplers = t.host.samplers.len(),
-                        cached,
-                        ms,
-                        user_ms,
-                        kernel_ms,
-                        "shader translated"
-                    ),
+                    Ok(t) => {
+                        // Keep the fixed WaveSize requested by the emitted
+                        // DXIL next to the adapter's actual capability range.
+                        // This makes an unexpected wave64 result observable
+                        // before D3D12 rejects the pipeline on a wave32 host.
+                        let dxil_wave_size = r4y_shader::emit::host::wave_size(&t.host.dxil);
+                        let host_wave_target = crate::host::host().map(|host| host.wave_target);
+                        tracing::info!(
+                            stage = self.stage,
+                            hash = %self.hash,
+                            user_data = t.host.user_data.len(),
+                            samplers = t.host.samplers.len(),
+                            dxil_wave_size = ?dxil_wave_size,
+                            host_wave_target = ?host_wave_target,
+                            cached,
+                            ms,
+                            user_ms,
+                            kernel_ms,
+                            "shader translated"
+                        )
+                    },
                     Err(e) => tracing::warn!(
                         stage = self.stage,
                         hash = %self.hash,
