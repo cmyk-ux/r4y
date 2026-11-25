@@ -845,8 +845,9 @@ impl State {
         let sampler_heap = if self.heaps[1] != 0 {
             crate::descriptor::heap(self.heaps[1] as This).host().map(|h| h.heap.clone())
         } else {
-            Some(host.default_samplers.clone())
-        };
+            None
+        }
+        .or_else(|| Some(host.default_samplers.clone()));
         let sampler_key = sampler_heap
             .as_ref()
             .map_or(0, |heap| heap.as_raw() as usize);
