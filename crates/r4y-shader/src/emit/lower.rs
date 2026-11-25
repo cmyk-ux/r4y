@@ -9028,9 +9028,10 @@ impl<'a> Lower<'a> {
         let index = match index {
             Some(i) if used.is_none() && !typed => {
                 // A resource-heap descriptor has no static used-resource
-                // record. Its live structured stride comes from the host's
-                // per-slot table; keep the byte address until the operation
-                // is emitted as a StructuredBuffer access below.
+                // record. Its live stride comes from the host's per-slot
+                // table; convert element indexing to a byte offset and emit
+                // RawBuffer coordinates. StructuredBuffer DXIL requires a
+                // compile-time StructStrideInBytes.
                 let stride = self.view_stride(src)?;
                 let rows = self.s.m.bin(c, Bin::Mul, i, stride);
                 off = self.s.m.bin(c, Bin::Add, rows, off);
