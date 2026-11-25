@@ -568,3 +568,48 @@ Other audit conclusions:
 4. Do not ask the user to repeat the local suite simply to compensate for missing CI. After CI and source-level failures are resolved, request only the hardware evidence that CI cannot provide (RTX 3070 D3D12 dispatch and affected-title A/B).
 5. Queue the indirect scratch/count correctness redesign from the AMD audit as a focused R4Y-native work item; do not implement clamp hoisting before correctness tests and source-write ordering are sound.
 6. Add helper-lane/quad and helper `v_readfirstlane` shader fixtures as a separate targeted investigation. Keep this distinct from the Wave64 compute split and GTA VI runtime watchdog.
+
+
+## 10. Indirect argument clamp: non-destructive scratch output (2026-11-25)
+
+### Implementation now present on the branch
+
+Latest feature head at this update: `b7f39f590c0c5bb8d9640b13b0ec52a7be7a8ce6` (PR #16, still open).
+
+Files changed:
+- `crates/r4y-gpu/src/indirect.rs`
+- `crates/r4y-gpu/src/draw.rs`
+- `crates/r4y-gpu/src/host.rs`
+- `crates/r4y-gpu/src/capture.rs`
+
+The old R4Y clamp wrote directly into the title's argument shadow and processed up to `max` even when an `ExecuteIndirect` count buffer specified fewer active records. The current implementation changes that contract:
+
+1. The clamp reads the original arguments and optional count as `ByteAddressBuffer` SRVs.
+2. It exits for `id.x >= min(max, count)` (or `max` without a count), so inactive tail records are neither read nor copied.
+3. It writes complete active records into a reusable device-local UAV scratch buffer; `ExecuteIndirect` consumes that scratch resource at offset zero. The original argument shadow is left unchanged.
+4. The per-list work budget uses a bounded compare-exchange loop and saturating accounting rather than an unbounded / wrapping atomic add.
+5. The count buffer state is tracked as a compatible union of shader-resource and indirect-argument read states. Diagnostic capture now transitions from and back to that exact tracked state.
+6. The budget and scratch UAVs are explicitly transitioned to COMMON at list close; scratch resources (including resized/retired buffers) are tracked through their actual states. This is necessary because explicitly transitioned buffers do not decay automatically to COMMON, and a closed list may be submitted again before it is reset.
+
+### Tests added
+
+- `argument_clamp_hlsl_compiles_without_a_gpu`: always exercises D3DCompile for the embedded HLSL/root-signature source on Windows, even if the runner has no D3D12 adapter.
+- `argument_clamp_builds_on_host`: additionally checks that the available host device accepts the root signature and compute PSO; it returns early if no host adapter is available.
+- `count_limits_clamp_writes_on_host`: runs the actual clamp dispatch on the configured host when available. It sets count=1 with three source records, pre-fills output tail records with `0xDEAD_BEEF`, and checks that only the first active record changes, the original source is unchanged, and the count stays 1. It also submits the same closed command list twice to exercise scratch/budget state replay.
+- `indirect_count_keeps_compatible_shader_read_state`: checks that shader-resource and indirect read states are combined, rather than treating the count buffer as indirect-only.
+- Additional pure layout tests cover record minimum stride, dword alignment and scratch byte-size calculation.
+
+### Validation and outstanding cautions
+
+- **No CI run or check status exists for the exact head `b7f39f590c0c5bb8d9640b13b0ec52a7be7a8ce6`.** The GitHub Actions query by that SHA returned no runs and no commit statuses. The current GitHub connector still exposes no workflow-dispatch/new-run action. Do not call the change compiled, tested or green until an actual CI run validates the exact head.
+- The HLSL compile test can run without a GPU, but the host PSO and dispatch tests return early when `crate::host::host()` is unavailable. Their execution must be confirmed from CI logs or a supported local D3D12 run.
+- The structured-buffer lowering prototype from commit `004cfac5d87904ba1fc63d0b0fe4f02ea5643a14` remains a separate unvalidated risk; this indirect-clamp work does not validate it.
+- PR #16 is still `mergeable=false`, with the feature branch 139 commits ahead and 27 behind `main` at the time checked. No rebase or merge was attempted. Inspect and reconcile the divergence separately; do not rewrite the branch blindly.
+- Do not begin clamp hoisting/performance batching yet. First validate this non-destructive scratch path, count behavior, list replay, Clippy (including all-features), diagnostics and release builds. Only then measure the real title workload and decide whether hoisting is worthwhile.
+
+### Immediate next actions
+
+1. Trigger CI on the exact current feature SHA once a dispatch-capable route is available; inspect HLSL compilation, GPU tests, Clippy, diagnostics/release builds and workspace tests.
+2. If CI fails, fix the exact failures before adding a new subsystem.
+3. If hosted CI has no usable D3D12 adapter, retain the HLSL compiler test as hosted coverage and run the dispatch test on a D3D12 host/WARP-capable environment; do not represent a skipped GPU test as executed.
+4. After the clamp has passed, continue to the next runtime blocker from the existing Wave64 handoff. Keep the AMD helper-lane investigation separate until the affected title/runtime or focused shader fixtures justify it.
