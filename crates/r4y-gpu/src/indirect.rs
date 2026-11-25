@@ -492,6 +492,9 @@ mod tests {
         }
         list.close();
         host.execute(&[&list]);
+        // The same closed list can be submitted again: its explicit scratch
+        // and budget transitions must start and end in COMMON on each run.
+        host.execute(&[&list]);
 
         let mut mapped = std::ptr::null_mut();
         let range = D3D12_RANGE { Begin: 0, End: bytes as usize };
