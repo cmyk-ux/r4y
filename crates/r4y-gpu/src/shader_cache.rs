@@ -55,7 +55,8 @@ pub fn counts() -> (u64, u64) {
 /// What a translation depends on besides its container: the translator
 /// (`r4y_shader::SOURCE_HASH`: its sources, manifest, the lock file and
 /// the compiler), the entry's encoding (this file's text) and the
-/// translation settings (loop limit, heap layout and group-barrier mode).
+/// translation settings (loop limit, heap layout, group-barrier mode and
+/// Wave64 cross-half fallback).
 fn build() -> &'static [u8; 32] {
     static BUILD: OnceLock<[u8; 32]> = OnceLock::new();
     BUILD.get_or_init(|| {
@@ -73,6 +74,12 @@ fn build() -> &'static [u8; 32] {
                 "R4Y_GROUP_SYNC: using experimental group-barrier behavior"
             );
         }
+        let wave64_console_flow = r4y_shader::emit::wave64_console_flow();
+        if !wave64_console_flow {
+            tracing::warn!(
+                "R4Y_WAVE64_CONSOLE_FLOW=0: shaders requiring cross-half Wave64 exchange will be refused"
+            );
+        }
         key_for_target(
             r4y_shader::SOURCE_HASH,
             ENCODING,
@@ -80,6 +87,7 @@ fn build() -> &'static [u8; 32] {
             r4y_shader::emit::heap_views(),
             r4y_shader::emit::title_views(),
             group_sync,
+            wave64_console_flow,
             crate::host::host().map_or(Target::NONE, |host| host.wave_target),
         )
     })
@@ -90,7 +98,7 @@ const ENCODING: &[u8] = include_bytes!("shader_cache.rs");
 
 #[cfg(test)]
 fn key(translator: &str, encoding: &[u8], limit: u32, views: u32, title: u32, group_sync: u8) -> [u8; 32] {
-    key_for_target(translator, encoding, limit, views, title, group_sync, Target::ANY)
+    key_for_target(translator, encoding, limit, views, title, group_sync, true, Target::ANY)
 }
 
 /// Host wave capabilities are part of the cache identity: one translation
@@ -102,6 +110,7 @@ fn key_for_target(
     views: u32,
     title: u32,
     group_sync: u8,
+    wave64_console_flow: bool,
     target: Target,
 ) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
@@ -110,7 +119,7 @@ fn key_for_target(
     h.update(&limit.to_le_bytes());
     h.update(&views.to_le_bytes());
     h.update(&title.to_le_bytes());
-    h.update(&[group_sync]);
+    h.update(&[group_sync, u8::from(wave64_console_flow)]);
     h.update(&target.key());
     *h.finalize().as_bytes()
 }
@@ -488,9 +497,13 @@ mod tests {
         let nvidia = Target { lanes_min: 32, lanes_max: 32 };
         let rdna = Target { lanes_min: 32, lanes_max: 64 };
         let by_target = |target| {
-            key_for_target("0123456789abcdef", b"encoding", 1 << 20, views, views, group_sync, target)
+            key_for_target("0123456789abcdef", b"encoding", 1 << 20, views, views, group_sync, true, target)
         };
         assert_ne!(by_target(nvidia), by_target(rdna));
+        assert_ne!(
+            k,
+            key_for_target("0123456789abcdef", b"encoding", 1 << 20, views, views, group_sync, false, Target::ANY)
+        );
         assert_eq!(
             *build(),
             key_for_target(
@@ -500,6 +513,7 @@ mod tests {
                 r4y_shader::emit::heap_views(),
                 r4y_shader::emit::title_views(),
                 r4y_shader::emit::group_sync(),
+                r4y_shader::emit::wave64_console_flow(),
                 crate::host::host().map_or(Target::NONE, |host| host.wave_target),
             )
         );
