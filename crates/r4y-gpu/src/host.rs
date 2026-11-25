@@ -437,6 +437,10 @@ pub(crate) struct HostList {
     /// The work its indirect executions may still do (`indirect`): a
     /// shader-writable word, zeroed when the list is submitted.
     budget: OnceLock<Option<(ID3D12Resource, usize)>>,
+    /// Reusable device-local output for the indirect argument clamp. The
+    /// state persists across list resets; retired buffers stay alive until
+    /// the reset after the submission fence completes.
+    indirect_args: Mutex<IndirectArgs>,
     /// The texts of the markers `note_op` set, in order (for device-removed
     /// data without marker texts), with the host GPU range a copy reads.
     #[cfg(feature = "diagnostics")]
@@ -449,6 +453,13 @@ pub(crate) struct HostList {
     /// and at the end, and where they are read back.
     #[cfg(feature = "diagnostics")]
     stamps: OnceLock<Option<(ID3D12QueryHeap, ID3D12Resource)>>,
+}
+
+/// Reusable device-local output for indirect argument clamping.
+#[derive(Default)]
+struct IndirectArgs {
+    current: Option<(ID3D12Resource, u64, u32)>,
+    retired: Vec<ID3D12Resource>,
 }
 
 /// Timestamps per list (diagnostics); commands past them are not timed.
@@ -682,6 +693,7 @@ impl Host {
                 prelude: (prelude_allocator, prelude),
                 pipelines: Mutex::default(),
                 budget: OnceLock::new(),
+                indirect_args: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
                 notes: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
@@ -1233,6 +1245,9 @@ impl HostList {
         self.wanted.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.twins.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        // The current scratch buffer is reused with its actual D3D12 state;
+        // replaced buffers are safe to release only after this fence.
+        self.indirect_args.lock().unwrap_or_else(|e| e.into_inner()).retired.clear();
         #[cfg(feature = "diagnostics")]
         self.notes.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
@@ -1685,6 +1700,57 @@ impl HostList {
         Some(unsafe { buffer.GetGPUVirtualAddress() })
     }
 
+    /// A device-local UAV scratch buffer for a single indirect argument
+    /// stream. One buffer is reused at offset zero: ExecuteIndirect and the
+    /// next clamp are ordered in this same command list.
+    pub(crate) fn indirect_scratch(&self, bytes: u64) -> Option<ID3D12Resource> {
+        let size = bytes.max(4).next_multiple_of(256);
+        let mut scratch = self.indirect_args.lock().unwrap_or_else(|e| e.into_inner());
+        if scratch.current.as_ref().is_none_or(|(_, capacity, _)| *capacity < size) {
+            let buffer = host()?.uav_buffer(size)?;
+            name(&buffer, || format!("indirect argument scratch {size:#x}"));
+            if let Some((old, _, _)) = scratch.current.take() {
+                scratch.retired.push(old);
+            }
+            scratch.current = Some((buffer, size, 0));
+        }
+        let (buffer, _, state) = scratch.current.as_mut()?;
+        if *state != BUFFER_UAV {
+            // SAFETY: the list is open; the reusable buffer is retained by
+            // this HostList until its submission has completed.
+            unsafe {
+                self.list.ResourceBarrier(&[transition(
+                    buffer,
+                    D3D12_RESOURCE_STATES(*state as i32),
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                )]);
+            }
+            *state = BUFFER_UAV;
+        }
+        Some(buffer.clone())
+    }
+
+    /// After the clamp writes its output, make it readable by ExecuteIndirect.
+    pub(crate) fn indirect_ready(&self) {
+        let mut scratch = self.indirect_args.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((buffer, _, state)) = scratch.current.as_mut() else {
+            return;
+        };
+        if *state == BUFFER_INDIRECT {
+            return;
+        }
+        debug_assert_eq!(*state, BUFFER_UAV);
+        // SAFETY: the list is open and this buffer is retained by this list.
+        unsafe {
+            self.list.ResourceBarrier(&[transition(
+                buffer,
+                D3D12_RESOURCE_STATES(*state as i32),
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            )]);
+        }
+        *state = BUFFER_INDIRECT;
+    }
+
     /// Keeps `object` alive until the list is reset.
     pub(crate) fn keep(&self, object: &impl Interface) {
         if let Ok(object) = object.cast::<windows::core::IUnknown>() {
@@ -2029,6 +2095,44 @@ impl Host {
             )
         };
         made.ok().and(buffer)
+    }
+
+    /// A device-local buffer for shader-written indirect arguments.
+    pub(crate) fn uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
+        let heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            ..Default::default()
+        };
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: size.max(1),
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            ..Default::default()
+        };
+        let mut buffer: Option<ID3D12Resource> = None;
+        // SAFETY: plain creation of a device-local UAV buffer.
+        let result = unsafe {
+            self.device.CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_COMMON,
+                None,
+                &mut buffer,
+            )
+        };
+        match result {
+            Ok(()) => buffer,
+            Err(error) => {
+                tracing::warn!(error = %error, size, "no indirect argument scratch buffer");
+                None
+            }
+        }
     }
 
     pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
