@@ -8953,6 +8953,7 @@ impl<'a> Lower<'a> {
             .copied()
             .ok_or("an untracked buffer")?;
         let used = self.used_kind(src);
+        let mut structured_stride = None;
         let (base, extra) = self.built_offset(src)?;
         if base != 0 {
             let b = self.s.m.i32(base);
@@ -9026,13 +9027,27 @@ impl<'a> Lower<'a> {
         // element times the view's stride (the host's table) plus the offset.
         let index = match index {
             Some(i) if used.is_none() && !typed => {
+                // A resource-heap descriptor has no static used-resource
+                // record. Its live structured stride comes from the host's
+                // per-slot table; keep the byte address until the operation
+                // is emitted as a StructuredBuffer access below.
                 let stride = self.view_stride(src)?;
                 let rows = self.s.m.bin(c, Bin::Mul, i, stride);
                 off = self.s.m.bin(c, Bin::Add, rows, off);
+                structured_stride = Some(stride);
                 None
             }
             index => index,
         };
+        // A known structured descriptor can also be addressed by byte
+        // offset alone (idxen=false). DXIL still needs element index and
+        // byte offset within that element, rather than a raw-buffer offset.
+        if structured_stride.is_none() && index.is_none() && !typed
+            && !matches!(src, Source::Built { .. })
+            && let Some(used) = used.filter(|u| u.stride >= 4 && u.stride.is_multiple_of(4))
+        {
+            structured_stride = Some(self.s.m.i32(used.stride));
+        }
         let uav = store || atomic.is_some() || used.is_some_and(|u| u.kind == ResourceType::Uav);
         let u = if uav { 0x1000 } else { 0 };
         let iu = self.s.m.undef(self.s.t.i32);
@@ -9047,6 +9062,13 @@ impl<'a> Lower<'a> {
                     }
                     let h = self.handle(site, src, false, (12 | u, stride))?;
                     (h, [index, off, iu])
+                }
+                None if let Some(stride) = structured_stride => {
+                    let property_stride = used.map_or(0, |u| u.stride);
+                    let h = self.handle(site, src, false, (12 | u, property_stride))?;
+                    let element = self.s.m.bin(c, Bin::UDiv, off, stride);
+                    let within = self.s.m.bin(c, Bin::URem, off, stride);
+                    (h, [element, within, iu])
                 }
                 None => {
                     let (h, off) = self.raw_view(site, src, off, 4, (11 | u, 0), true, guard)?;
@@ -9164,6 +9186,13 @@ impl<'a> Lower<'a> {
                         args.push(self.handle(site, src, false, (12 | u, stride))?);
                         args.extend([index, off]);
                     }
+                    None if let Some(stride) = structured_stride => {
+                        let property_stride = used.map_or(0, |u| u.stride);
+                        let h = self.handle(site, src, false, (12 | u, property_stride))?;
+                        let element = self.s.m.bin(c, Bin::UDiv, off, stride);
+                        let within = self.s.m.bin(c, Bin::URem, off, stride);
+                        args.extend([h, element, within]);
+                    }
                     None => {
                         let bytes = 4 * count;
                         let (h, off) =
@@ -9268,6 +9297,20 @@ impl<'a> Lower<'a> {
                         self.s.t.res_ret,
                         139,
                         &[h, index, off, mask, align],
+                    )
+                }
+                None if let Some(stride) = structured_stride => {
+                    let property_stride = used.map_or(0, |u| u.stride);
+                    let h = self.handle(site, src, false, (12 | u, property_stride))?;
+                    let element = self.s.m.bin(c, Bin::UDiv, off, stride);
+                    let within = self.s.m.bin(c, Bin::URem, off, stride);
+                    self.s.op(
+                        self.cur,
+                        "rawBufferLoad.f32",
+                        Attr::ReadOnly,
+                        self.s.t.res_ret,
+                        139,
+                        &[h, element, within, mask, align],
                     )
                 }
                 None => {
