@@ -1954,6 +1954,13 @@ impl<'a> Lower<'a> {
             None => (v, false),
         };
         let &m = self.x.st.masks.get(&lo).ok_or(LANE_MASK)?;
+        // Masks that are not a per-lane EXEC value (constants and values
+        // formed elsewhere) must retain their scalar bit pattern. A ballot
+        // would incorrectly turn them into the lanes that happen to test true.
+        if !self.x.st.active.contains(&lo) && !self.ballots.contains_key(&lo) {
+            let xy = self.mask_number(lo)?;
+            self.ballots.insert(lo, xy);
+        }
         if self.console_cf {
             if let Some(&xy) = self.ballots.get(&lo) {
                 return Ok(if high { xy.1 } else { xy.0 });
@@ -1975,10 +1982,6 @@ impl<'a> Lower<'a> {
         }
         if self.split {
             return Err("a lane mask read whole in a wave64 program split in halves");
-        }
-        if !self.x.st.active.contains(&lo) && !self.ballots.contains_key(&lo) {
-            let xy = self.mask_number(lo)?;
-            self.ballots.insert(lo, xy);
         }
         let (x, y) = match self.ballots.get(&lo) {
             Some(&xy) => xy,
