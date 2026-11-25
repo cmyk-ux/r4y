@@ -73,7 +73,7 @@ function Write-Warn([string]$Message) { Write-Host ('[!] ' + $Message) -Foregrou
 function Enable-VirtualTerminal {
     if ([Console]::IsOutputRedirected) { return $false }
     try {
-        if (-not ('R4Y.ConsoleMode' -as [type])) {
+        if (-not ('R4YConsoleMode' -as [type])) {
             Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
