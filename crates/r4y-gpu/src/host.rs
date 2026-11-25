@@ -1790,7 +1790,7 @@ impl HostList {
     pub(crate) fn indirect_scratch(&self, bytes: u64) -> Option<ID3D12Resource> {
         let size = bytes.max(4).next_multiple_of(256);
         let mut scratch = self.indirect_args.lock().unwrap_or_else(|e| e.into_inner());
-        if scratch.current.as_ref().map_or(true, |(_, capacity, _)| *capacity < size) {
+        if scratch.current.as_ref().is_none_or(|(_, capacity, _)| *capacity < size) {
             let buffer = host()?.uav_buffer(size)?;
             name(&buffer, || format!("indirect argument scratch {size:#x}"));
             if let Some((old, _, state)) = scratch.current.take() {
