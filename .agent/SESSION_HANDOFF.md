@@ -317,3 +317,37 @@ At session start:
 5. Update this file when technical state changes, including commit/PR IDs, exact tests, limitations and next steps.
 
 Do not put game assets, proprietary title data, shader dumps, keys, credentials, or machine-specific sensitive information in Git. The log hashes above are diagnostic shader identifiers supplied for this investigation; do not add shader binaries, disassembly, or title-derived material.
+
+
+## 7. Installer CI triage (2026-11-25)
+
+The user resumed from the "Corrigir teste DPP" session and asked to continue with installer CI failures #162/#163.
+
+### Confirmed root cause
+
+- The valid installer body in `scripts/install.ps1` ended at its first `exit $exitCode` (about line 580).
+- A stale, malformed 186-line tail had been appended after that exit. It began with the orphaned fragment `-and [int]$choice -ge 1 ...`, then repeated the remainder of `Select-Game`, duplicated `ConvertTo-TomlString`, `Write-Config`, `Build-R4Y`, `Invoke-Setup`, `Write-Launcher`, and appended a second main `try/catch`/exit block.
+- The generic executable selection change itself is valid in the retained body: it auto-selects exactly one top-level `.exe`, prompts for a numeric choice when there are multiple candidates, falls back to the file picker/manual path, and validates extension and containment within the selected folder.
+- CI #163 (run 45581923697) checked out merge commit `9bdd0cfc950da9674364f7d368c1d4895f60c8d7`; the first installer validation step failed during PowerShell parsing with unexpected `)` and `}` tokens. Dry-run, MSVC, native stderr, Rust setup, Clippy, build, tests and the D3D12 hardware step were all skipped.
+- CI #161 (run 45581816240, parent installer revision) failed at the same first step with a larger set of parser errors, including the prompt string and CMD launcher text being parsed as malformed PowerShell. This predates #163.
+- The GitHub Actions connector used here returns commit-associated runs filtered to pull-request events. It surfaced #161 and #163, but did not expose the user's referenced #162 push run; do not invent its run ID or conclusion. Check the Actions UI if its exact record is needed.
+
+### Fix applied
+
+- Commit `128e3d135799304390676a8667247088e900675d` on `main`: `fix(installer): remove stale duplicated script tail`.
+- Commit `a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa` on `feature/wave64-host-target` (PR #16): same fix.
+- Both branches now have the same `scripts/install.ps1` blob SHA `8bcb58005d94fd4c91ae9d454ae827037c409f9e`; file is 580 lines, with one `Select-Game`, one set of helper definitions, and one terminal `exit $exitCode`.
+- 186 stale lines removed; no valid installer logic was intentionally changed.
+
+### Verification after fix
+
+- PR CI #165, run `45583509798`, for PR head `a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa`: at the last check, installer PowerShell parse + read-only dry-run passed, MSVC environment initialization passed, Windows PowerShell 5.1 native-stderr probe passed, Rust toolchain install and cache setup passed; normal Clippy was running. Build/tests had not yet been reached.
+- Run link: https://github.com/cmyk-ux/r4y/actions/runs/45583509798
+- Main fix commit link: https://github.com/cmyk-ux/r4y/commit/128e3d135799304390676a8667247088e900675d
+- PR branch fix commit link: https://github.com/cmyk-ux/r4y/commit/a24552a29ed8b8f5c3cb2865dd6faffc62ec30aa
+
+### Next actions
+
+1. Re-check CI #165 to its terminal conclusion. If Clippy/build/tests fail, inspect the exact failing step and fix it; do not mistake a successful parser step for full CI success.
+2. Check the main push CI for commit `128e3d1` if the available Actions listing exposes it; the current connector's `fetch_commit_workflow_runs` wrapper is PR-filtered.
+3. Keep PR #16 open until the already documented RTX 3070 Wave64 test and affected-title runtime regression check are accounted for. The earlier user RTX 3070 DPP/Wave64 dispatch suite passed; installer CI parser errors were independent and prevented the hosted run from reaching its D3D12 step.
