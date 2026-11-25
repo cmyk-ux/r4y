@@ -413,6 +413,17 @@ impl Twin {
             }
             if converts && let Some(c) = converter() {
                 l.ResourceBarrier(&[state(COPY_DEST as i32, UNORDERED_ACCESS as i32)]);
+                if crate::host::dred_on() {
+                    static TWIN_ROOT_BINDS: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    if TWIN_ROOT_BINDS.fetch_add(1, Relaxed) < 24 {
+                        tracing::info!(
+                            target: "r4y_gpu::binding",
+                            root = c.root.as_raw() as usize as u64,
+                            "depth-twin converter root signature bind"
+                        );
+                    }
+                }
                 l.SetComputeRootSignature(&c.root);
                 l.SetPipelineState(&c.pso);
                 l.SetComputeRootUnorderedAccessView(1, self.scratch.GetGPUVirtualAddress());
