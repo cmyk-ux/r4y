@@ -32,6 +32,9 @@ jobs:
       - name: Validate MSVC environment initialization
         shell: pwsh
         run: ./scripts/install.ps1 -OptionString '--check-msvc'
+      - name: Validate native stderr handling in Windows PowerShell 5.1
+        shell: pwsh
+        run: ./scripts/install.ps1 -OptionString '--test-native-output'
       # The version and components pinned in rust-toolchain.toml.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
