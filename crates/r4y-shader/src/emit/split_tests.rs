@@ -20,6 +20,12 @@ const IN_HALF: &[u32] = &[
     0xFF01_4001, // v_mov_b32_dpp v2, v1: row mirror
 ];
 
+const DPP_ROW_MASK: &[u32] = &[
+    0x7E04_0281, // v_mov_b32 v2, 1
+    0x7E04_02FA, // v_mov_b32 v2, v0
+    0x3F00_E400, // v_mov_b32_dpp v2, v0: quad permute, row_mask 0x3
+];
+
 fn target(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device) -> Option<Target> {
     let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
     // SAFETY: D3D12 fills the correctly sized OPTIONS1 structure.
@@ -167,5 +173,22 @@ fn in_half_lane_reads_match_console_on_d3d12_hardware() {
         eprintln!(
             "{threads} threads per group matched console lane order (split wave64: {split})"
         );
+    }
+
+    // DPP row masks name the four rows of a 64-lane console wave. The
+    // upper half maps to rows 2/3 even though it is host rows 0/1.
+    for threads in [64, 128] {
+        let native = program(DPP_ROW_MASK, threads);
+        let out = run(&host, target, &native, 2)
+            .unwrap_or_else(|error| panic!("DPP row-mask dispatch: {error}"));
+        let want: Vec<u32> = (0..2)
+            .flat_map(|_| {
+                (0..threads).map(|lane| {
+                    let console_lane = lane % 64;
+                    if console_lane < 32 { console_lane } else { 1 }
+                })
+            })
+            .collect();
+        assert_eq!(out, want, "DPP row masks for {threads} threads");
     }
 }
