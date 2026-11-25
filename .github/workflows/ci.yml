@@ -29,6 +29,13 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path ./scripts/install.ps1), [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -gt 0) { $errors | Format-List; exit 1 }
           ./scripts/install.ps1 -OptionString '--dry-run'
+          $installerPath = (Resolve-Path ./scripts/install.ps1).Path
+          $workspaceRoot = Split-Path -Parent (Split-Path -Parent $installerPath)
+          if (-not (Test-Path (Join-Path $workspaceRoot 'Cargo.toml')) -or
+              -not (Test-Path (Join-Path $workspaceRoot 'apps/r4y/Cargo.toml'))) {
+            throw "Installer resolved an invalid workspace root: $workspaceRoot"
+          }
+          Write-Host "Installer workspace root: $workspaceRoot"
       - name: Validate MSVC environment initialization
         shell: pwsh
         run: ./scripts/install.ps1 -OptionString '--check-msvc'
