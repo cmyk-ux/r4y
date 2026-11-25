@@ -1303,6 +1303,10 @@ mod host_wave_target_tests {
     }
 
     fn compute(words: &[u32], wave64: bool) -> NativeProgram {
+        compute_threads(words, wave64, 64)
+    }
+
+    fn compute_threads(words: &[u32], wave64: bool, threads: u32) -> NativeProgram {
         NativeProgram {
             stage: HwStage::Cs,
             wave64,
@@ -1311,7 +1315,7 @@ mod host_wave_target_tests {
             used: vec![],
             io: StageIo::Cs(ComputeIo {
                 rsrc2: 0,
-                threads: [64, 1, 1],
+                threads: [threads, 1, 1],
             }),
             code: words.iter().flat_map(|word| word.to_le_bytes()).collect(),
         }
@@ -1348,12 +1352,12 @@ mod host_wave_target_tests {
     }
 
     #[test]
-    fn host_wave_range_refuses_only_unsupported_declared_wave_sizes() {
+    fn cross_half_console_flow_translates_to_wave32_only_for_one_group_wave() {
         let wave64_read_lane = compute(
             &[
-                0xD760_0000, // v_readlane_b32 s0, v0, 5
-                0x0001_0B00,
-                0x7E02_0200, // v_mov_b32 v1, s0
+                0xD760_0009, // v_readlane_b32 s9, v0, 40
+                0x0001_5100,
+                0x7E04_0209, // v_mov_b32 v2, s9
                 0xBF81_0000,
             ],
             true,
@@ -1361,18 +1365,31 @@ mod host_wave_target_tests {
         let nvidia = Target { lanes_min: 32, lanes_max: 32 };
         let rdna = Target { lanes_min: 32, lanes_max: 64 };
 
+        assert_eq!(wave_size(&translate(&wave64_read_lane, nvidia).unwrap().dxil), Some(32));
+        assert_eq!(wave_size(&translate(&wave64_read_lane, rdna).unwrap().dxil), Some(64));
         assert!(translate(&wave64_read_lane, Target::ANY).is_ok());
-        assert!(translate(&wave64_read_lane, rdna).is_ok());
+
+        // A group containing multiple console waves is not allowed to use a
+        // single pair of group-shared exchange slots.
+        let multi_wave = compute_threads(
+            &[
+                0xD760_0009,
+                0x0001_5100,
+                0x7E04_0209,
+                0xBF81_0000,
+            ],
+            true,
+            128,
+        );
         assert!(matches!(
-            translate(&wave64_read_lane, nvidia),
+            translate(&multi_wave, nvidia),
             Err(ShaderError::Unsupported {
                 what: "console wave64 lanes on a host without 64-lane waves",
                 ..
             })
         ));
 
-        // Read-first-lane is whole-wave too, even in a shader with no
-        // DPP/swizzle instructions to trigger the in-half split logic.
+        // The first console lane is lane zero from both host halves.
         let wave64_read_first = compute(
             &[
                 0x7E12_0500, // v_readfirstlane_b32 s9, v0
@@ -1381,17 +1398,27 @@ mod host_wave_target_tests {
             ],
             true,
         );
-        assert!(matches!(
-            translate(&wave64_read_first, nvidia),
-            Err(ShaderError::Unsupported {
-                what: "console wave64 lanes on a host without 64-lane waves",
-                ..
-            })
-        ));
+        assert_eq!(wave_size(&translate(&wave64_read_first, nvidia).unwrap().dxil), Some(32));
 
-        // A wave64 program which does not depend on lane layout does not
-        // declare WaveSize(64) and remains usable on a 32-lane host.
+        // A Wave64 shader without lane-layout dependencies needs no fixed
+        // WaveSize declaration and remains valid on a 32-lane adapter.
         let scalar_wave64 = compute(&[0x7E02_0300, 0xBF81_0000], true);
         assert!(translate(&scalar_wave64, nvidia).is_ok());
+    }
+
+    #[test]
+    fn console_flow_translates_wave64_mask_count_and_shared_exchange() {
+        let mask_count = compute(
+            &[
+                0x7D88_00A8, // v_cmp_gt_u32 vcc, 40, v0
+                0xBE89_106A, // s_bcnt1_i32_b64 s9, vcc
+                0x7E04_0209, // v_mov_b32 v2, s9
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let nvidia = Target { lanes_min: 32, lanes_max: 32 };
+        let shader = translate(&mask_count, nvidia).unwrap();
+        assert_eq!(wave_size(&shader.dxil), Some(32));
     }
 }
