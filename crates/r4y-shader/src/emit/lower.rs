@@ -636,7 +636,10 @@ impl<'a> Lower<'a> {
                 let n = i.name();
                 n.contains("permute")
                     || n.starts_with("v_mbcnt")
-                    || matches!(n, "v_readlane_b32" | "v_writelane_b32")
+                    || matches!(
+                        n,
+                        "v_readlane_b32" | "v_writelane_b32" | "v_readfirstlane_b32"
+                    )
                     || reads_mask_as_data(x.st, i)
             };
             let reads_whole = insts().any(whole);
