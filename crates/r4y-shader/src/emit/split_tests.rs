@@ -120,7 +120,7 @@ fn run(
         unreachable!()
     };
     let n = io.threads.iter().product::<u32>() * groups;
-    let views = [View::RawUav(n)];
+    let views = [View::RawUav(n), View::Pair];
     let out = host.dispatch(
         &root,
         &pso,
