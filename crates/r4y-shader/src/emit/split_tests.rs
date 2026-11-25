@@ -37,7 +37,7 @@ const MASK_COUNT: &[u32] = &[
 const MBCNT_LOW: &[u32] = &[
     0xD765_0001,
     0x0001_00C1, // v_mbcnt_lo_u32_b32 v1, -1, 0
-    0x7E04_0201, // v_mov_b32 v2, v1
+    0x7E04_0301, // v_mov_b32 v2, v1 (VGPR source 0x101, not SGPR s1)
 ];
 
 const CROSS_HALF_READ: &[u32] = &[
