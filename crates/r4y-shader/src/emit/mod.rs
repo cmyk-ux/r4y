@@ -184,6 +184,8 @@ mod memory_tests;
 mod sampler;
 #[cfg(all(test, windows))]
 mod semantics_tests;
+#[cfg(all(test, windows))]
+mod split_tests;
 mod shader;
 #[cfg(all(test, windows))]
 mod stride_tests;
@@ -259,6 +261,28 @@ fn parse_group_sync(value: Option<&str>) -> u8 {
         Some("1") => 1,
         _ => 2,
     }
+}
+
+/// Whether the Wave64-to-Wave32 fallback may exchange values across the two
+/// host waves with group-shared memory and group barriers. This is a
+/// diagnostic bypass, not a correctness workaround: affected shaders are
+/// refused when disabled. The setting is part of the shader-cache key.
+///
+/// Set `R4Y_WAVE64_CONSOLE_FLOW=0` to disable only this cross-half fallback;
+/// in-half Wave64 splitting remains enabled.
+pub fn wave64_console_flow() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_wave64_console_flow(std::env::var("R4Y_WAVE64_CONSOLE_FLOW").ok().as_deref())
+    })
+}
+
+/// Invalid or missing values preserve the enabled default. Pure, for testing.
+fn parse_wave64_console_flow(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(str::trim),
+        Some("0" | "false" | "off" | "no")
+    )
 }
 
 /// `R4Y_SHADER_LOOP_LIMIT`'s value; the default when it is unset,
@@ -360,9 +384,60 @@ pub struct UserData {
     pub dword: u32,
 }
 
+/// The wave sizes (lanes per wave) the host GPU runs, as D3D12 reports them.
+/// A shader declaring a wave size outside this range cannot create a valid
+/// pipeline on that host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Target {
+    pub lanes_min: u32,
+    pub lanes_max: u32,
+}
+
+impl Target {
+    /// No known limit: preserve the previous behavior and let the driver decide.
+    pub const ANY: Self = Self {
+        lanes_min: 4,
+        lanes_max: 128,
+    };
+
+    /// The host reported no usable wave operations. Any shader requiring a
+    /// fixed wave size is rejected; shaders without wave operations remain valid.
+    pub const NONE: Self = Self {
+        lanes_min: 1,
+        lanes_max: 0,
+    };
+
+    /// Whether the host supports waves with this lane count.
+    pub fn runs(self, lanes: u32) -> bool {
+        (self.lanes_min..=self.lanes_max).contains(&lanes)
+    }
+
+    /// The range as bytes, for cache fingerprints.
+    pub fn key(self) -> [u8; 8] {
+        let mut key = [0; 8];
+        key[..4].copy_from_slice(&self.lanes_min.to_le_bytes());
+        key[4..].copy_from_slice(&self.lanes_max.to_le_bytes());
+        key
+    }
+}
+
+impl Default for Target {
+    fn default() -> Self {
+        Self::ANY
+    }
+}
+
 /// Translates the vertex, pixel, compute or mesh program of a console
 /// shader container.
 pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
+    translate_for(container, Target::ANY)
+}
+
+/// Translates a console shader for a host with the given wave-size range.
+pub fn translate_for(
+    container: &[u8],
+    target: Target,
+) -> Result<HostShader, ShaderError> {
     let c = Container::parse(container)?;
     let dxil = c
         .part(FourCC::DXIL)
@@ -386,10 +461,10 @@ pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
     let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok())?;
     let io = io::raise(&p, &native)?;
     let st = st?;
-    emit(&c, &native, &p, &st, &io, &res)
+    emit_for(&c, &native, &p, &st, &io, &res, target)
 }
 
-/// Emits a program whose earlier stages already ran.
+/// Emits a program whose earlier stages already ran, for any host.
 pub fn emit(
     c: &Container,
     native: &NativeProgram,
@@ -397,6 +472,49 @@ pub fn emit(
     st: &structure::Structured,
     io: &io::Io,
     res: &resource::Resources,
+) -> Result<HostShader, ShaderError> {
+    emit_for(c, native, p, st, io, res, Target::ANY)
+}
+
+/// Emits a program whose earlier stages already ran for a host with the
+/// given wave-size range.
+pub fn emit_for(
+    c: &Container,
+    native: &NativeProgram,
+    p: &ir::Program,
+    st: &structure::Structured,
+    io: &io::Io,
+    res: &resource::Resources,
+    target: Target,
+) -> Result<HostShader, ShaderError> {
+    emit_for_with_console_flow(
+        c,
+        native,
+        p,
+        st,
+        io,
+        res,
+        EmitOptions {
+            target,
+            allow_console_flow: wave64_console_flow(),
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct EmitOptions {
+    target: Target,
+    allow_console_flow: bool,
+}
+
+fn emit_for_with_console_flow(
+    c: &Container,
+    native: &NativeProgram,
+    p: &ir::Program,
+    st: &structure::Structured,
+    io: &io::Io,
+    res: &resource::Resources,
+    options: EmitOptions,
 ) -> Result<HostShader, ShaderError> {
     let sig = |fourcc| -> Result<Vec<container::SigElement>, ShaderError> {
         match c.part(fourcc) {
@@ -453,7 +571,7 @@ pub fn emit(
         }
         _ => 0,
     };
-    let parts = |st, res| lower::Parts {
+    let parts = |st, res, console_cf| lower::Parts {
         native,
         p,
         st,
@@ -463,17 +581,37 @@ pub fn emit(
         outputs: outputs.clone(),
         prims: prims.clone(),
         mesh_stride,
+        target: options.target,
+        console_cf,
     };
-    let l = match lower::lower(&parts(st, res)) {
+    let first = lower::lower(&parts(st, res, false));
+    let l = match first {
+        Err(ShaderError::Unsupported {
+            what: lower::CONSOLE_FLOW,
+            ..
+        }) if options.allow_console_flow => {
+            // Re-structure as the console does: all lanes follow the same
+            // block sequence, while EXEC is retained as each instruction's
+            // vector guard. Only the bounded one-wave/no-LDS subset is sent
+            // through this path by Lower::new.
+            let console = structure::structure_console(p)?;
+            let resources = resource::track(
+                p,
+                &native.layout,
+                native.stage,
+                Some(&console),
+            )?;
+            lower::lower(&parts(&console, &resources, true))?
+        }
         // Discarded lanes kept on as helpers can read what no surviving
         // lane does (a register only killed lanes skipped writing); such a
         // program kills them as the console does (`structure::killing`).
         Err(_) if !st.discards.is_empty() => {
-            let st = structure::killing(p)?;
-            let res = resource::track(p, &native.layout, native.stage, Some(&st))?;
-            lower::lower(&parts(&st, &res))?
+            let killed = structure::killing(p)?;
+            let resources = resource::track(p, &native.layout, native.stage, Some(&killed))?;
+            lower::lower(&parts(&killed, &resources, false))?
         }
-        l => l?,
+        result => result?,
     };
     Ok(HostShader {
         stage: native.stage,
@@ -598,7 +736,7 @@ fn signature(part: &[u8]) -> Result<Vec<container::SigElement>, ShaderError> {
 mod tests {
     use super::bitcode::Attr;
     use super::lower::LOOP_LIMIT;
-    use super::{parse_group_sync, parse_loop_limit};
+    use super::{parse_group_sync, parse_loop_limit, parse_wave64_console_flow};
 
     #[test]
     fn the_group_sync_switch_parses_or_falls_back() {
@@ -609,6 +747,17 @@ mod tests {
         for bad in ["", "-1", "3", "strict", "0x1"] {
             assert_eq!(parse_group_sync(Some(bad)), 2, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_wave64_console_flow_switch_parses_or_falls_back() {
+        assert!(parse_wave64_console_flow(None));
+        assert!(parse_wave64_console_flow(Some("1")));
+        assert!(parse_wave64_console_flow(Some("true")));
+        for disabled in ["0", "false", "off", "no"] {
+            assert!(!parse_wave64_console_flow(Some(disabled)), "{disabled:?}");
+        }
+        assert!(parse_wave64_console_flow(Some("unknown")));
     }
 
     #[test]
@@ -1198,5 +1347,234 @@ mod tests {
         let io = crate::io::raise(&p, &native).unwrap();
         // Translated or refused with a reason; it must not panic.
         let _ = super::emit(&c, &native, &p, &st, &io, &res);
+    }
+}
+
+
+#[cfg(test)]
+mod host_wave_target_tests {
+    use super::{Container, Target, emit_for_with_console_flow};
+    use crate::native::{ComputeIo, HwStage, NativeProgram, StageIo};
+    use crate::{ShaderError, io, ir, resource, structure};
+
+    fn translate(native: &NativeProgram, target: Target) -> Result<super::HostShader, ShaderError> {
+        translate_with_console_flow(native, target, true)
+    }
+
+    fn translate_with_console_flow(
+        native: &NativeProgram,
+        target: Target,
+        allow_console_flow: bool,
+    ) -> Result<super::HostShader, ShaderError> {
+        let bytes = crate::dxbc::build(&[]);
+        let container = Container::parse(&bytes)?;
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs)?;
+        let st = structure::structure(&p)?;
+        let resources = resource::track(&p, &native.layout, native.stage, Some(&st))?;
+        let raised = io::raise(&p, native)?;
+        emit_for_with_console_flow(
+            &container,
+            native,
+            &p,
+            &st,
+            &raised,
+            &resources,
+            super::EmitOptions {
+                target,
+                allow_console_flow,
+            },
+        )
+    }
+
+    fn compute(words: &[u32], wave64: bool) -> NativeProgram {
+        compute_threads(words, wave64, 64)
+    }
+
+    fn compute_threads(words: &[u32], wave64: bool, threads: u32) -> NativeProgram {
+        NativeProgram {
+            stage: HwStage::Cs,
+            wave64,
+            vgprs: 8,
+            layout: vec![],
+            used: vec![],
+            io: StageIo::Cs(ComputeIo {
+                rsrc2: 0,
+                threads: [threads, 1, 1],
+            }),
+            code: words.iter().flat_map(|word| word.to_le_bytes()).collect(),
+        }
+    }
+
+    fn wave_size(dxil: &[u8]) -> Option<u32> {
+        let container = Container::parse(dxil).ok()?;
+        let psv = container.part(crate::dxbc::FourCC::PSV0)?.data;
+        let min = crate::dxbc::u32_at(psv, 4 + 16).ok()?;
+        let max = crate::dxbc::u32_at(psv, 4 + 20).ok()?;
+        (min == max).then_some(min)
+    }
+
+    #[test]
+    fn in_half_dpp_and_swizzle_translate_to_32_lanes_on_nvidia() {
+        let native = compute(
+            &[
+                0xD8D4_401F,
+                0x0100_0000, // ds_swizzle_b32 v1, v0: xor 16
+                0x7E04_02FA,
+                0xFF01_4001, // v_mov_b32_dpp v2, v1: row mirror
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let nvidia = Target { lanes_min: 32, lanes_max: 32 };
+        let rdna = Target { lanes_min: 32, lanes_max: 64 };
+
+        let split = translate(&native, nvidia).unwrap();
+        assert_eq!(wave_size(&split.dxil), Some(32));
+
+        let native_wave64 = translate(&native, rdna).unwrap();
+        assert_eq!(wave_size(&native_wave64.dxil), Some(64));
+    }
+
+    #[test]
+    fn cross_half_console_flow_translates_to_wave32_only_for_one_group_wave() {
+        let wave64_read_lane = compute(
+            &[
+                0xD760_0009, // v_readlane_b32 s9, v0, 40
+                0x0001_5100,
+                0x7E04_0209, // v_mov_b32 v2, s9
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let nvidia = Target { lanes_min: 32, lanes_max: 32 };
+        let rdna = Target { lanes_min: 32, lanes_max: 64 };
+
+        assert_eq!(wave_size(&translate(&wave64_read_lane, nvidia).unwrap().dxil), Some(32));
+        assert_eq!(wave_size(&translate(&wave64_read_lane, rdna).unwrap().dxil), Some(64));
+        assert!(matches!(
+            translate_with_console_flow(&wave64_read_lane, nvidia, false),
+            Err(ShaderError::Unsupported {
+                what: super::lower::CONSOLE_FLOW,
+                ..
+            })
+        ));
+        assert!(translate(&wave64_read_lane, Target::ANY).is_ok());
+
+        // A group containing multiple console waves is not allowed to use a
+        // single pair of group-shared exchange slots.
+        let multi_wave = compute_threads(
+            &[
+                0xD760_0009,
+                0x0001_5100,
+                0x7E04_0209,
+                0xBF81_0000,
+            ],
+            true,
+            128,
+        );
+        assert!(matches!(
+            translate(&multi_wave, nvidia),
+            Err(ShaderError::Unsupported {
+                what: "console wave64 lanes on a host without 64-lane waves",
+                ..
+            })
+        ));
+
+        // The first console lane is lane zero from both host halves.
+        let wave64_read_first = compute(
+            &[
+                0x7E12_0500, // v_readfirstlane_b32 s9, v0
+                0x7E04_0209, // v_mov_b32 v2, s9
+                0xBF81_0000,
+            ],
+            true,
+        );
+        assert_eq!(wave_size(&translate(&wave64_read_first, nvidia).unwrap().dxil), Some(32));
+
+        // A Wave64 shader without lane-layout dependencies needs no fixed
+        // WaveSize declaration and remains valid on a 32-lane adapter.
+        let scalar_wave64 = compute(&[0x7E02_0300, 0xBF81_0000], true);
+        assert!(translate(&scalar_wave64, nvidia).is_ok());
+    }
+
+    #[test]
+    fn console_flow_translates_wave64_mask_count_and_shared_exchange() {
+        let nvidia = Target { lanes_min: 32, lanes_max: 32 };
+        let mask_count = compute(
+            &[
+                0x7D88_00A8, // v_cmp_gt_u32 vcc, 40, v0
+                0xBE89_106A, // s_bcnt1_i32_b64 s9, vcc
+                0x7E04_0209, // v_mov_b32 v2, s9
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let shader = translate(&mask_count, nvidia).unwrap();
+        assert_eq!(wave_size(&shader.dxil), Some(32));
+
+        let mbcnt = compute(
+            &[
+                0xD765_0001,
+                0x0001_00C1, // v_mbcnt_lo_u32_b32 v1, -1, 0
+                0x7E04_0301, // v_mov_b32 v2, v1 (VGPR source 0x101, not SGPR s1)
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let shader = translate(&mbcnt, nvidia).unwrap();
+        assert_eq!(wave_size(&shader.dxil), Some(32));
+
+        let writelane = compute(
+            &[
+                0x7E0A_0280, // v_mov_b32 v5, 0
+                0xBE89_03AA, // s_mov_b32 s9, 42
+                0xD761_0005,
+                0x0001_5009, // v_writelane_b32 v5, s9, 40
+                0x7E04_0205, // v_mov_b32 v2, v5
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let shader = translate(&writelane, nvidia).unwrap();
+        assert_eq!(wave_size(&shader.dxil), Some(32));
+
+        let branch = compute(
+            &[
+                0x7E04_0281, // v_mov_b32 v2, 1
+                0x7D88_0094, // v_cmp_gt_u32 vcc, 20, v0
+                0xBE8A_246A, // s_and_saveexec_b64 s[10:11], vcc
+                0xBF88_0003, // s_cbranch_execz end
+                0xD760_0009,
+                0x0001_1500, // v_readlane_b32 s9, v0, 10
+                0x7E04_0209, // v_mov_b32 v2, s9
+                0x88FE_0A7E, // s_or_b64 exec, exec, s[10:11]
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let shader = translate(&branch, nvidia).unwrap();
+        assert_eq!(wave_size(&shader.dxil), Some(32));
+
+        let loop_body = compute(
+            &[
+                0xBE89_0380, // s_mov_b32 s9, 0
+                0x7E04_0280, // v_mov_b32 v2, 0
+                0x7D8A_0080, // v_cmp_ne_u32 vcc, 0, v0
+                0xBE8A_246A, // s_and_saveexec_b64 s[10:11], vcc
+                0xBF88_0006, // s_cbranch_execz end
+                0xD760_0009,
+                0x0001_5100, // v_readlane_b32 s9, v0, 40
+                0x4A04_0481, // v_add_nc_u32 v2, 1, v2
+                0x7D82_0102, // v_cmp_lt_u32 vcc, v2, v0
+                0x87FE_6A7E, // s_and_b64 exec, exec, vcc
+                0xBF89_FFFA, // s_cbranch_execnz loop
+                0x88FE_0A7E, // s_or_b64 exec, exec, s[10:11]
+                0x4A04_0409, // v_add_nc_u32 v2, s9, v2
+                0xBF81_0000,
+            ],
+            true,
+        );
+        let shader = translate(&loop_body, nvidia).unwrap();
+        assert_eq!(wave_size(&shader.dxil), Some(32));
     }
 }

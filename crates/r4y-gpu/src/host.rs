@@ -63,6 +63,8 @@ const RTV_RING: u32 = 1024;
 
 pub(crate) struct Host {
     pub(crate) device: ID3D12Device,
+    /// D3D12's supported wave-size range, queried once during device creation.
+    pub(crate) wave_target: r4y_shader::emit::Target,
     queue: ID3D12CommandQueue,
     fence: ID3D12Fence,
     /// The last value signalled on `fence`, behind the submission lock.
@@ -209,7 +211,9 @@ fn create() -> windows::core::Result<Host> {
         // Diagnostics: the software adapter, on which a shader's wild access
         // is an access violation in this process (a crash report with the
         // address and instruction) instead of a GPU fault and driver reset.
-        if cfg!(feature = "diagnostics") && std::env::var_os("R4Y_D3D12_WARP").is_some() {
+        if (cfg!(feature = "diagnostics") || cfg!(test))
+            && std::env::var_os("R4Y_D3D12_WARP").is_some()
+        {
             let adapter = warp_adapter()?;
             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
             tracing::info!("host device on the software adapter (WARP)");
@@ -217,6 +221,36 @@ fn create() -> windows::core::Result<Host> {
             D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
         }
         let device = device.ok_or_else(windows::core::Error::empty)?;
+        let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+        let queried = device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS1,
+                (&raw mut options).cast(),
+                size_of_val(&options) as u32,
+            )
+            .is_ok();
+        let wave_target = if queried
+            && options.WaveOps.as_bool()
+            && options.WaveLaneCountMin > 0
+            && options.WaveLaneCountMin <= options.WaveLaneCountMax
+        {
+            r4y_shader::emit::Target {
+                lanes_min: options.WaveLaneCountMin,
+                lanes_max: options.WaveLaneCountMax,
+            }
+        } else {
+            r4y_shader::emit::Target::NONE
+        };
+        tracing::info!(
+            lanes_min = wave_target.lanes_min,
+            lanes_max = wave_target.lanes_max,
+            "host wave sizes"
+        );
+        if !wave_target.runs(64) {
+            tracing::warn!(
+                "the host has no 64-lane waves; console wave64 compute shaders that need cross-lane semantics cannot run natively"
+            );
+        }
         let messages = debug
             .then(|| device.cast::<ID3D12InfoQueue>().ok())
             .flatten();
@@ -282,6 +316,7 @@ fn create() -> windows::core::Result<Host> {
         // host chooses (the RX 6700 XT does, WARP does not).
         let shader_host = r4y_shader::emit::host::Host {
             device: device.clone(),
+            wave_target: Some(wave_target),
         };
         // Discover the real shader-visible view-heap capacity before the
         // shader cache fingerprints or translates any title program.
@@ -295,6 +330,7 @@ fn create() -> windows::core::Result<Host> {
         }
         Ok(Host {
             device,
+            wave_target,
             queue,
             fence,
             submitted: Mutex::new(0),
@@ -340,6 +376,18 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indirect_count_keeps_compatible_shader_read_state() {
+        assert_eq!(
+            buffer_after(BUFFER_SHADER_RESOURCE, BUFFER_INDIRECT),
+            BUFFER_SHADER_RESOURCE | BUFFER_INDIRECT,
+        );
+        assert_eq!(
+            buffer_after(BUFFER_UAV, BUFFER_SHADER_RESOURCE),
+            BUFFER_SHADER_RESOURCE,
+        );
+    }
 
     #[test]
     fn warp_adapter_accepts_only_software() {
@@ -403,10 +451,19 @@ pub(crate) struct HostList {
     /// The work its indirect executions may still do (`indirect`): a
     /// shader-writable word, zeroed when the list is submitted.
     budget: OnceLock<Option<(ID3D12Resource, usize)>>,
+    /// The budget buffer's explicit state in the currently recorded list.
+    budget_state: Mutex<u32>,
+    /// Reusable device-local output for the indirect argument clamp. The
+    /// state persists across list resets; retired buffers stay alive until
+    /// the reset after the submission fence completes.
+    indirect_args: Mutex<IndirectArgs>,
     /// The texts of the markers `note_op` set, in order (for device-removed
     /// data without marker texts), with the host GPU range a copy reads.
     #[cfg(feature = "diagnostics")]
     notes: Mutex<Vec<Note>>,
+    /// Markers for dispatches recorded in this list's prelude command list.
+    #[cfg(feature = "diagnostics")]
+    prelude_notes: Mutex<Vec<String>>,
     /// In a frame `crate::capture` lists: the textures the list renders to
     /// or writes, and the pipeline that first wrote each (diagnostics).
     #[cfg(feature = "diagnostics")]
@@ -415,6 +472,13 @@ pub(crate) struct HostList {
     /// and at the end, and where they are read back.
     #[cfg(feature = "diagnostics")]
     stamps: OnceLock<Option<(ID3D12QueryHeap, ID3D12Resource)>>,
+}
+
+/// Reusable device-local output for indirect argument clamping.
+#[derive(Default)]
+struct IndirectArgs {
+    current: Option<(ID3D12Resource, u64, u32)>,
+    retired: Vec<(ID3D12Resource, u32)>,
 }
 
 /// Timestamps per list (diagnostics); commands past them are not timed.
@@ -648,8 +712,12 @@ impl Host {
                 prelude: (prelude_allocator, prelude),
                 pipelines: Mutex::default(),
                 budget: OnceLock::new(),
+                budget_state: Mutex::new(0),
+                indirect_args: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
                 notes: Mutex::default(),
+                #[cfg(feature = "diagnostics")]
+                prelude_notes: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
                 targets: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
@@ -947,7 +1015,13 @@ impl Host {
                 let done = p.pLastBreadcrumbValue.as_ref().copied().unwrap_or(0);
                 let ours = p.pCommandList.as_ref().map(|l| l.as_raw());
                 let index = runs.iter().position(|r| Some(r.list.as_raw()) == ours);
-                progress.push(format!("{done}/{} {index:?}", p.BreadcrumbCount));
+                let prelude_index = runs
+                    .iter()
+                    .position(|r| Some(r.prelude.1.as_raw()) == ours);
+                progress.push(format!(
+                    "{done}/{} main={index:?} prelude={prelude_index:?}",
+                    p.BreadcrumbCount
+                ));
                 node = p.pNext;
             }
             text.push_str(&format!("; breadcrumbs (done/count, list) {progress:?}"));
@@ -963,21 +1037,40 @@ impl Host {
                     ));
                     let list = p.pCommandList.as_ref().map(|l| l.as_raw());
                     let run = runs.iter().find(|r| Some(r.list.as_raw()) == list);
-                    // The k-th marker command is the k-th note.
                     #[cfg(feature = "diagnostics")]
-                    let markers: Vec<(u32, String)> = run.map_or_else(Vec::new, |r| {
-                        let notes = r.notes.lock().unwrap_or_else(|e| e.into_inner());
+                    let prelude = runs
+                        .iter()
+                        .find(|r| Some(r.prelude.1.as_raw()) == list);
+                    // The k-th marker command is paired with the k-th note
+                    // from the matching main or prelude command list.
+                    #[cfg(feature = "diagnostics")]
+                    let markers: Vec<(u32, String)> = {
+                        let main_notes = run.map(|r| {
+                            r.notes
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .iter()
+                                .map(|(note, range)| {
+                                    let place = fault_va.zip(*range).map(|(va, r)| fault_in(va, r));
+                                    format!("{note}{}", place.unwrap_or_default())
+                                })
+                                .collect::<Vec<_>>()
+                        });
+                        let prelude_notes = prelude.map(|r| {
+                            r.prelude_notes
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone()
+                        });
+                        let notes = main_notes.or(prelude_notes).unwrap_or_default();
                         history
                             .iter()
                             .enumerate()
                             .filter(|(_, op)| **op == D3D12_AUTO_BREADCRUMB_OP_SETMARKER)
                             .zip(notes.iter())
-                            .map(|((at, _), (note, range))| {
-                                let place = fault_va.zip(*range).map(|(va, r)| fault_in(va, r));
-                                (at as u32, format!("{note}{}", place.unwrap_or_default()))
-                            })
+                            .map(|((at, _), note)| (at as u32, note.clone()))
                             .collect()
-                    });
+                    };
                     #[cfg(not(feature = "diagnostics"))]
                     let markers: Vec<(u32, String)> = Vec::new();
                     #[cfg(not(feature = "diagnostics"))]
@@ -987,6 +1080,13 @@ impl Host {
                     } else if let Some(r) = run {
                         let pipelines = r.pipelines.lock().unwrap_or_else(|e| e.into_inner());
                         text.push_str(&format!(", its pipelines {pipelines:?}"));
+                    }
+                    #[cfg(feature = "diagnostics")]
+                    if done == 0 {
+                        if let Some(r) = prelude {
+                            let notes = r.prelude_notes.lock().unwrap_or_else(|e| e.into_inner());
+                            text.push_str(&format!(", prelude operations {notes:?}"));
+                        }
                     }
                 }
                 plain = p.pNext;
@@ -1173,6 +1273,57 @@ impl HostList {
             // Keep the Arc<Shadow> entries alive until reset(), which is
             // called only after the submission fence has completed.
         }
+        // The per-list budget is also an explicitly transitioned UAV.
+        // Return it to COMMON so this closed list can be safely replayed.
+        {
+            let mut state = self.budget_state.lock().unwrap_or_else(|e| e.into_inner());
+            if *state != 0
+                && let Some((buffer, _)) = self.budget.get().and_then(Option::as_ref)
+            {
+                // SAFETY: the list is open and the budget buffer is live.
+                unsafe {
+                    self.list.ResourceBarrier(&[transition(
+                        buffer,
+                        D3D12_RESOURCE_STATES(*state as i32),
+                        D3D12_RESOURCE_STATE_COMMON,
+                    )]);
+                }
+                *state = 0;
+            }
+        }
+        // Indirect scratch buffers use explicit transitions, so they do not
+        // decay to COMMON after submission. Return every buffer used by this
+        // recording to COMMON before close: the closed list may be submitted
+        // again until the title resets it.
+        {
+            let mut scratch = self.indirect_args.lock().unwrap_or_else(|e| e.into_inner());
+            let mut barriers = Vec::with_capacity(scratch.retired.len() + 1);
+            for (buffer, state) in &mut scratch.retired {
+                if *state != 0 {
+                    barriers.push(transition(
+                        buffer,
+                        D3D12_RESOURCE_STATES(*state as i32),
+                        D3D12_RESOURCE_STATE_COMMON,
+                    ));
+                    *state = 0;
+                }
+            }
+            if let Some((buffer, _, state)) = scratch.current.as_mut()
+                && *state != 0
+            {
+                barriers.push(transition(
+                    buffer,
+                    D3D12_RESOURCE_STATES(*state as i32),
+                    D3D12_RESOURCE_STATE_COMMON,
+                ));
+                *state = 0;
+            }
+            if !barriers.is_empty() {
+                // SAFETY: the list is open and all scratch buffers remain
+                // retained by this HostList through the submission fence.
+                unsafe { self.list.ResourceBarrier(&barriers) };
+            }
+        }
         #[cfg(feature = "diagnostics")]
         if let Some((heap, back)) = self.stamps() {
             let count = (self.notes.lock().unwrap_or_else(|e| e.into_inner()).len() as u32).min(STAMPS - 1);
@@ -1199,6 +1350,9 @@ impl HostList {
         self.wanted.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.twins.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        // The current scratch buffer is reused with its actual D3D12 state;
+        // replaced buffers are safe to release only after this fence.
+        self.indirect_args.lock().unwrap_or_else(|e| e.into_inner()).retired.clear();
         #[cfg(feature = "diagnostics")]
         self.notes.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
@@ -1312,13 +1466,13 @@ impl HostList {
         &self,
         shadow: &std::sync::Arc<crate::shadow::Shadow>,
         wanted: u32,
-    ) {
+    ) -> u32 {
         let mut buffers = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
         let key = std::sync::Arc::as_ptr(shadow) as usize;
         let before = buffers.get(&key).map_or(0, |entry| entry.0);
         let after = buffer_after(before, wanted);
         if after == before {
-            return;
+            return after;
         }
         buffers.insert(key, (after, shadow.clone()));
         if before != 0 {
@@ -1331,22 +1485,7 @@ impl HostList {
                 )])
             };
         }
-    }
-
-    /// Record the state left by an explicit barrier already emitted by a
-    /// specialized operation (the indirect-argument clamp).
-    pub(crate) fn set_buffer_state(
-        &self,
-        shadow: &std::sync::Arc<crate::shadow::Shadow>,
-        state: u32,
-    ) {
-        self.buffers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                std::sync::Arc::as_ptr(shadow) as usize,
-                (state, shadow.clone()),
-            );
+        after
     }
 
     /// Add a use made by a descriptor/root binding. Uses of the same buffer
@@ -1384,6 +1523,8 @@ impl HostList {
     /// At submission: move each texture the list uses from its real state
     /// to the state the list assumes at its start.
     fn prelude(&self) -> Option<ID3D12CommandList> {
+        #[cfg(feature = "diagnostics")]
+        self.prelude_notes.lock().unwrap_or_else(|e| e.into_inner()).clear();
         // Depth textures and their twins first, from their real states and
         // back: the side each first use needs, made newer.
         let twins = self.twins.lock().unwrap_or_else(|e| e.into_inner());
@@ -1416,18 +1557,28 @@ impl HostList {
                     let Some(Some(twin)) = depth.twin.get() else { continue };
                     // From each texture's real state to the copy's and back.
                     let mut back = Vec::new();
-                    twin.copy(list, depth, *to_depth, &mut |t, wanted| {
-                        let real = t.state.load(Ordering::Relaxed);
-                        let wanted = legal_state(&t.texture, wanted);
-                        (real != wanted).then(|| {
-                            back.push(transition(
-                                &t.texture,
-                                D3D12_RESOURCE_STATES(wanted as i32),
-                                D3D12_RESOURCE_STATES(real as i32),
-                            ));
-                            transition(&t.texture, D3D12_RESOURCE_STATES(real as i32), D3D12_RESOURCE_STATES(wanted as i32))
-                        })
-                    });
+                    twin.copy(
+                        list,
+                        depth,
+                        *to_depth,
+                        &mut |t, wanted| {
+                            let real = t.state.load(Ordering::Relaxed);
+                            let wanted = legal_state(&t.texture, wanted);
+                            (real != wanted).then(|| {
+                                back.push(transition(
+                                    &t.texture,
+                                    D3D12_RESOURCE_STATES(wanted as i32),
+                                    D3D12_RESOURCE_STATES(real as i32),
+                                ));
+                                transition(
+                                    &t.texture,
+                                    D3D12_RESOURCE_STATES(real as i32),
+                                    D3D12_RESOURCE_STATES(wanted as i32),
+                                )
+                            })
+                        },
+                        &mut |what| self.note_prelude(list, what),
+                    );
                     if !back.is_empty() {
                         list.ResourceBarrier(&back);
                     }
@@ -1442,6 +1593,27 @@ impl HostList {
             fail(format_args!("a host state prelude did not record ({e})"));
         }
         list.cast().ok()
+    }
+
+    /// Marks an operation in the auxiliary list recorded just before this
+    /// list. Keeping these strings separately lets DRED map prelude markers
+    /// without accidentally pairing them with the main list's notes.
+    fn note_prelude(&self, list: &ID3D12GraphicsCommandList, what: String) {
+        #[cfg(feature = "diagnostics")]
+        if dred_on() {
+            let text: Vec<u16> = what.encode_utf16().chain([0]).collect();
+            const UNICODE: u32 = 0;
+            // SAFETY: the auxiliary list is open; SetMarker copies this text.
+            unsafe {
+                list.SetMarker(UNICODE, Some(text.as_ptr().cast()), 2 * text.len() as u32)
+            };
+            self.prelude_notes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(what);
+        }
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = (list, what);
     }
 
     /// Notes what the command about to be recorded does, as a marker
@@ -1634,10 +1806,27 @@ impl HostList {
         let (buffer, data) = self
             .budget
             .get_or_init(|| {
-                let (b, d) = host()?.shared_buffer(256)?;
-                Some((b, d as usize))
+                let (buffer, data) = host()?.shared_buffer(256)?;
+                Some((buffer, data as usize))
             })
             .as_ref()?;
+        {
+            let mut state = self.budget_state.lock().unwrap_or_else(|e| e.into_inner());
+            if *state != BUFFER_UAV {
+                // Buffers promoted implicitly from COMMON decay after a
+                // submission, but this UAV use is explicit. HostList::close
+                // returns it to COMMON so a closed list can be replayed.
+                // SAFETY: the list is open and the budget buffer is live.
+                unsafe {
+                    self.list.ResourceBarrier(&[transition(
+                        buffer,
+                        D3D12_RESOURCE_STATES(*state as i32),
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    )]);
+                }
+                *state = BUFFER_UAV;
+            }
+        }
         let mut deferred = self.deferred();
         if !deferred.budget_zeroed {
             deferred.budget_zeroed = true;
@@ -1649,6 +1838,57 @@ impl HostList {
         }
         // SAFETY: a live buffer.
         Some(unsafe { buffer.GetGPUVirtualAddress() })
+    }
+
+    /// A device-local UAV scratch buffer for a single indirect argument
+    /// stream. One buffer is reused at offset zero: ExecuteIndirect and the
+    /// next clamp are ordered in this same command list.
+    pub(crate) fn indirect_scratch(&self, bytes: u64) -> Option<ID3D12Resource> {
+        let size = bytes.max(4).next_multiple_of(256);
+        let mut scratch = self.indirect_args.lock().unwrap_or_else(|e| e.into_inner());
+        if scratch.current.as_ref().is_none_or(|(_, capacity, _)| *capacity < size) {
+            let buffer = host()?.uav_buffer(size)?;
+            name(&buffer, || format!("indirect argument scratch {size:#x}"));
+            if let Some((old, _, state)) = scratch.current.take() {
+                scratch.retired.push((old, state));
+            }
+            scratch.current = Some((buffer, size, 0));
+        }
+        let (buffer, _, state) = scratch.current.as_mut()?;
+        if *state != BUFFER_UAV {
+            // SAFETY: the list is open; the reusable buffer is retained by
+            // this HostList until its submission has completed.
+            unsafe {
+                self.list.ResourceBarrier(&[transition(
+                    buffer,
+                    D3D12_RESOURCE_STATES(*state as i32),
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                )]);
+            }
+            *state = BUFFER_UAV;
+        }
+        Some(buffer.clone())
+    }
+
+    /// After the clamp writes its output, make it readable by ExecuteIndirect.
+    pub(crate) fn indirect_ready(&self) {
+        let mut scratch = self.indirect_args.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((buffer, _, state)) = scratch.current.as_mut() else {
+            return;
+        };
+        if *state == BUFFER_INDIRECT {
+            return;
+        }
+        debug_assert_eq!(*state, BUFFER_UAV);
+        // SAFETY: the list is open and this buffer is retained by this list.
+        unsafe {
+            self.list.ResourceBarrier(&[transition(
+                buffer,
+                D3D12_RESOURCE_STATES(*state as i32),
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            )]);
+        }
+        *state = BUFFER_INDIRECT;
     }
 
     /// Keeps `object` alive until the list is reset.
@@ -1995,6 +2235,44 @@ impl Host {
             )
         };
         made.ok().and(buffer)
+    }
+
+    /// A device-local buffer for shader-written indirect arguments.
+    pub(crate) fn uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
+        let heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            ..Default::default()
+        };
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: size.max(1),
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            ..Default::default()
+        };
+        let mut buffer: Option<ID3D12Resource> = None;
+        // SAFETY: plain creation of a device-local UAV buffer.
+        let result = unsafe {
+            self.device.CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_COMMON,
+                None,
+                &mut buffer,
+            )
+        };
+        match result {
+            Ok(()) => buffer,
+            Err(error) => {
+                tracing::warn!(error = %error, size, "no indirect argument scratch buffer");
+                None
+            }
+        }
     }
 
     pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {

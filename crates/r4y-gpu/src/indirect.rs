@@ -23,51 +23,95 @@ use std::sync::Arc;
 
 use windows::core::s;
 
-use crate::host::{BUFFER_INDIRECT, BUFFER_UAV, HostList, host, transition};
+use crate::host::{HostList, host};
 use crate::shadow::Shadow;
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=4, b0), UAV(u0), UAV(u1)"
-cbuffer Record : register(b0) { uint kind; uint stride; uint records; uint unused; };
-RWByteAddressBuffer args : register(u0);
+#define RS "RootConstants(num32BitConstants=6, b0), SRV(t0), SRV(t1), UAV(u0), UAV(u1)"
+cbuffer Record : register(b0) {
+    uint kind;
+    uint stride;
+    uint records;
+    uint has_count;
+    uint args_offset;
+    uint count_offset;
+};
+ByteAddressBuffer args : register(t0);
+ByteAddressBuffer count_buf : register(t1);
+RWByteAddressBuffer dst_args : register(u0);
 // The list's work so far (vertex instances, threads): past the budget,
 // records run empty.
 RWByteAddressBuffer budget : register(u1);
 static const uint BUDGET = 1u << 27;
 // Groups of one dispatch; more run empty.
 static const uint GROUPS = 1u << 20;
+
+// Bounded, saturating accounting: never wrap the per-list budget and never
+// spin indefinitely under contention.
+bool charge_budget(uint cost) {
+    if (cost == 0) return false;
+    uint before;
+    budget.InterlockedOr(0, 0, before);
+    bool settled = false;
+    [allow_uav_condition]
+    for (uint tries = 0; tries < 256 && before < BUDGET; tries++) {
+        uint next = (BUDGET - before <= cost) ? BUDGET : (before + cost);
+        uint previous;
+        budget.InterlockedCompareExchange(0, before, next, previous);
+        if (previous == before) { settled = true; break; }
+        before = previous;
+    }
+    return !settled || before >= BUDGET || BUDGET - before < cost;
+}
+
 [RootSignature(RS)]
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= records) return;
-    uint at = id.x * stride;
+    // ExecuteIndirect also honors this count. The helper must honor it too:
+    // records beyond the active count are not read or copied.
+    uint active = records;
+    if (has_count != 0) active = min(active, count_buf.Load(count_offset));
+    if (id.x >= active) return;
+
+    uint src_at = args_offset + id.x * stride;
+    uint dst_at = id.x * stride;
     uint cost;
     if (kind <= 1) {
         // Draws: vertex or index count, then instances.
-        uint count = min(args.Load(at), 1u << 24);
-        uint instances = min(args.Load(at + 4), (1u << 26) / max(count, 1u));
+        uint count = min(args.Load(src_at), 1u << 24);
+        uint instances = min(args.Load(src_at + 4), (1u << 26) / max(count, 1u));
         cost = count * instances;
-        args.Store2(at, uint2(count, instances));
+        for (uint off = 8; off < stride; off += 4) {
+            dst_args.Store(dst_at + off, args.Load(src_at + off));
+        }
+        bool over = charge_budget(cost);
+        if (over) {
+            count = 0;
+            instances = 0;
+        }
+        dst_args.Store2(dst_at, uint2(count, instances));
     } else if (kind == 2) {
-        uint3 g = min(args.Load3(at), uint3(65535, 65535, 65535));
+        uint3 g = min(args.Load3(src_at), uint3(65535u, 65535u, 65535u));
         // x * y fits 32 bits; the whole count may not.
         if (g.z != 0 && g.x * g.y > GROUPS / g.z) {
             g = uint3(0, 0, 0);
         }
-        cost = g.x * g.y * g.z * 64;
-        args.Store3(at, g);
+        cost = g.x * g.y * g.z * 64u;
+        for (uint off = 12; off < stride; off += 4) {
+            dst_args.Store(dst_at + off, args.Load(src_at + off));
+        }
+        if (charge_budget(cost)) g = uint3(0, 0, 0);
+        dst_args.Store3(dst_at, g);
     } else {
         // Mesh dispatches: the console's are one-dimensional.
-        uint3 g = args.Load3(at);
+        uint3 g = args.Load3(src_at);
         g = uint3(min(g.x, 65535u), min(g.y, 1u), min(g.z, 1u));
-        cost = g.x * g.y * g.z * 128;
-        args.Store3(at, g);
-    }
-    uint before;
-    budget.InterlockedAdd(0, cost, before);
-    if (before >= BUDGET || before + cost > BUDGET) {
-        // Draws keep their layout with no vertices; groups become zero.
-        args.Store(at, 0);
+        cost = g.x * g.y * g.z * 128u;
+        for (uint off = 12; off < stride; off += 4) {
+            dst_args.Store(dst_at + off, args.Load(src_at + off));
+        }
+        if (charge_budget(cost)) g = uint3(0, 0, 0);
+        dst_args.Store3(dst_at, g);
     }
 }
 "#;
@@ -95,11 +139,11 @@ fn clamp() -> Option<&'static Clamp> {
         .as_ref()
 }
 
-fn make() -> windows::core::Result<Clamp> {
-    let device = &host().ok_or_else(windows::core::Error::empty)?.device;
+fn compile_clamp() -> windows::core::Result<ID3DBlob> {
     let mut code: Option<ID3DBlob> = None;
     let mut errors: Option<ID3DBlob> = None;
-    // SAFETY: the source and names live through the call; out pointers ours.
+    // SAFETY: the HLSL source and entry-point names live through the call;
+    // both output pointers refer to our local Options.
     let compiled = unsafe {
         D3DCompile(
             SOURCE.as_ptr().cast(),
@@ -115,20 +159,30 @@ fn make() -> windows::core::Result<Clamp> {
             Some(&mut errors),
         )
     };
-    if let Err(e) = compiled {
+    if let Err(error) = compiled {
         if let Some(errors) = errors {
-            // SAFETY: the blob's own bytes.
+            // SAFETY: the blob owns the diagnostic bytes being read.
             let text = unsafe {
-                std::slice::from_raw_parts(errors.GetBufferPointer().cast::<u8>(), errors.GetBufferSize())
+                std::slice::from_raw_parts(
+                    errors.GetBufferPointer().cast::<u8>(),
+                    errors.GetBufferSize(),
+                )
             };
             tracing::warn!("argument clamp: {}", String::from_utf8_lossy(text));
         }
-        return Err(e);
+        return Err(error);
     }
-    let code = code.ok_or_else(windows::core::Error::empty)?;
+    code.ok_or_else(windows::core::Error::empty)
+}
+
+fn make_for(device: &ID3D12Device) -> windows::core::Result<Clamp> {
+    let code = compile_clamp()?;
     // SAFETY: the blob's own bytes; the root signature is inside the shader.
     unsafe {
-        let bytes = std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize());
+        let bytes = std::slice::from_raw_parts(
+            code.GetBufferPointer().cast::<u8>(),
+            code.GetBufferSize(),
+        );
         let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes)?;
         let pso = device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
             pRootSignature: std::mem::transmute_copy(&root),
@@ -142,56 +196,180 @@ fn make() -> windows::core::Result<Clamp> {
     }
 }
 
-/// Records, in `list`, the clamp of `records` records of `kind` (PC
-/// argument numbering) `stride` bytes apart at host address `gpu` in
-/// `buffer`, and leaves the buffer ready to be read as arguments. Replaces
-/// the list's compute root signature and pipeline (callers bind theirs
-/// after). False if the clamp is not available.
+fn make() -> windows::core::Result<Clamp> {
+    let device = &host().ok_or_else(windows::core::Error::empty)?.device;
+    make_for(device)
+}
+
+/// Minimum record byte stride for a supported PC indirect argument kind.
+fn min_stride(kind: u32) -> Option<u32> {
+    match kind {
+        0 => Some(16),
+        1 => Some(20),
+        2 | 10 => Some(12),
+        _ => None,
+    }
+}
+
+/// Validates the byte range and the dword alignment required by ByteAddressBuffer.
+fn validate_layout(
+    (kind, stride, records): (u32, u32, u32),
+    args_gpu: u64,
+    count_gpu: Option<u64>,
+) -> Option<u64> {
+    // D3D12 limits each Dispatch dimension to 65,535 groups. The shader
+    // indexes records linearly through SV_DispatchThreadID.x, so refuse a
+    // request that would overflow that one-dimensional dispatch.
+    const MAX_RECORDS: u32 = 65_535 * 64;
+    if records > MAX_RECORDS
+        || stride < min_stride(kind)?
+        || !stride.is_multiple_of(4)
+        // Root ByteAddressBuffer descriptors are anchored at the allocation
+        // base, which must meet raw-buffer alignment (16 bytes).
+        || !args_gpu.is_multiple_of(16)
+    {
+        return None;
+    }
+    if count_gpu.is_some_and(|address| !address.is_multiple_of(16)) {
+        return None;
+    }
+    let bytes = u64::from(stride).checked_mul(u64::from(records))?;
+    (bytes <= u64::from(u32::MAX)).then_some(bytes)
+}
+
+fn root_offset(base: u64, len: u64, address: u64, bytes: u64) -> Option<u32> {
+    let offset = address.checked_sub(base)?;
+    let end = offset.checked_add(bytes)?;
+    if end > len || end > u64::from(u32::MAX) {
+        return None;
+    }
+    u32::try_from(offset).ok()
+}
+
+fn root_buffer(
+    shadow: &Arc<Shadow>,
+    address: u64,
+    bytes: u64,
+) -> Option<(u64, u32)> {
+    let (start, len) = shadow.range();
+    let base = shadow.gpu(start);
+    Some((base, root_offset(base, len, address, bytes)?))
+}
+
+/// Root-SRV addresses and byte offsets for the clamp's immutable inputs.
+#[derive(Clone, Copy)]
+struct Inputs {
+    args: u64,
+    args_offset: u32,
+    count: Option<u64>,
+    count_offset: u32,
+}
+
+/// Records one non-destructive clamp dispatch against raw GPU virtual
+/// addresses. Resource state transitions and lifetime are the caller's job.
+fn record_clamp(
+    c: &Clamp,
+    l: &ID3D12GraphicsCommandList,
+    dst: &ID3D12Resource,
+    budget: u64,
+    inputs: Inputs,
+    (kind, stride, records): (u32, u32, u32),
+) -> bool {
+    let Some(bytes) = validate_layout((kind, stride, records), inputs.args, inputs.count) else {
+        return false;
+    };
+    if !inputs.args_offset.is_multiple_of(4)
+        || !inputs.count_offset.is_multiple_of(4)
+        || u64::from(inputs.args_offset).checked_add(bytes).is_none_or(|end| end > u64::from(u32::MAX))
+        || u64::from(inputs.count_offset) + 4 > u64::from(u32::MAX)
+    {
+        return false;
+    }
+    // SAFETY: live D3D12 buffer resources.
+    let dst_gpu = unsafe { dst.GetGPUVirtualAddress() };
+    if !budget.is_multiple_of(4) || !dst_gpu.is_multiple_of(4) {
+        return false;
+    }
+    let constants = [
+        kind,
+        stride,
+        records,
+        u32::from(inputs.count.is_some()),
+        inputs.args_offset,
+        inputs.count_offset,
+    ];
+    // SAFETY: an open list, a compatible root signature/pipeline, and live
+    // source, optional count, destination and budget buffer GPU addresses.
+    unsafe {
+        l.ResourceBarrier(&[uav_barrier()]);
+        l.SetComputeRootSignature(&c.root);
+        l.SetPipelineState(&c.pso);
+        l.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
+        l.SetComputeRootShaderResourceView(1, inputs.args);
+        l.SetComputeRootShaderResourceView(2, inputs.count.unwrap_or(inputs.args));
+        l.SetComputeRootUnorderedAccessView(3, dst_gpu);
+        l.SetComputeRootUnorderedAccessView(4, budget);
+        if records > 0 {
+            l.Dispatch(records.div_ceil(64), 1, 1);
+        }
+    }
+    true
+}
+
+/// Records a non-destructive clamp of active indirect records into this
+/// list's reusable device-local scratch buffer. The title's argument and
+/// optional count buffers are read-only inputs; ExecuteIndirect consumes
+/// the returned output buffer at offset zero.
 pub(crate) fn bound(
     list: &HostList,
     shadow: &Arc<Shadow>,
     gpu: u64,
+    count: Option<(&Arc<Shadow>, u64)>,
     (kind, stride, records): (u32, u32, u32),
-) -> bool {
-    let (Some(c), Some(budget)) = (clamp(), list.budget()) else {
-        return false;
+) -> Option<ID3D12Resource> {
+    let (_, args_len) = shadow.range();
+    let (args_gpu, args_offset) = root_buffer(shadow, gpu, 0)?;
+    let count_binding = count.map(|(counter, address)| {
+        let gpu = counter.gpu(address);
+        root_buffer(counter, gpu, 4)
+    });
+    let (count_gpu, count_offset) = match count_binding {
+        Some(Some((base, offset))) => (Some(base), offset),
+        Some(None) => return None,
+        None => (None, 0),
     };
-    if !gpu.is_multiple_of(4) || !stride.is_multiple_of(4) {
-        return false;
+    let bytes = validate_layout((kind, stride, records), args_gpu, count_gpu)?;
+    if u64::from(args_offset).checked_add(bytes).is_none_or(|end| end > args_len) {
+        return None;
     }
-    let l = &list.list;
-    let constants = [kind, stride, records, 0];
-    list.buffer_state(shadow, BUFFER_UAV);
-    // SAFETY: an open list; our root signature, pipeline and a live buffer
-    // the caller's list holds.
-    unsafe {
-        // Earlier shader writes (the title's argument passes) first.
-        l.ResourceBarrier(&[uav_barrier()]);
-        l.SetComputeRootSignature(&c.root);
-        l.SetPipelineState(&c.pso);
-        l.SetComputeRoot32BitConstants(0, 4, constants.as_ptr().cast(), 0);
-        l.SetComputeRootUnorderedAccessView(1, gpu);
-        l.SetComputeRootUnorderedAccessView(2, budget);
-        l.Dispatch(records.div_ceil(64), 1, 1);
-        l.ResourceBarrier(&[
-            uav_barrier(),
-            transition(
-                &shadow.buffer,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
-            ),
-        ]);
+    let c = clamp()?;
+    let budget = list.budget()?;
+    let dst = list.indirect_scratch(bytes)?;
+
+    // The source and count are shader reads. If they alias the same shadow
+    // resource, the tracker coalesces these compatible read states.
+    list.buffer_state(shadow, crate::host::BUFFER_SHADER_RESOURCE);
+    if let Some((counter, _)) = count {
+        list.buffer_state(counter, crate::host::BUFFER_SHADER_RESOURCE);
     }
-    list.set_buffer_state(shadow, BUFFER_INDIRECT);
-    true
+    if !record_clamp(
+        c,
+        &list.list,
+        &dst,
+        budget,
+        Inputs {
+            args: args_gpu,
+            args_offset,
+            count: count_gpu,
+            count_offset,
+        },
+        (kind, stride, records),
+    ) {
+        return None;
+    }
+    list.indirect_ready();
+    Some(dst)
 }
-
-/// After the execution: the copy back to unordered access, where title
-/// passes may continue using it.
-pub(crate) fn done(list: &HostList, shadow: &Arc<Shadow>) {
-    list.buffer_state(shadow, BUFFER_UAV);
-}
-
 fn uav_barrier() -> D3D12_RESOURCE_BARRIER {
     D3D12_RESOURCE_BARRIER {
         Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
@@ -204,12 +382,237 @@ fn uav_barrier() -> D3D12_RESOURCE_BARRIER {
 
 #[cfg(test)]
 mod tests {
-    /// The clamp compiles with the system's compiler and the host takes it.
+    /// HLSL syntax and the embedded root signature compile without a GPU.
     #[test]
-    fn argument_clamp_builds() {
-        if super::host().is_none() {
-            return; // no host GPU here
+    fn argument_clamp_hlsl_compiles_without_a_gpu() {
+        assert!(super::compile_clamp().is_ok());
+    }
+
+    /// The host also accepts the compiled root signature and compute PSO.
+    #[test]
+    fn argument_clamp_builds_on_host() {
+        let host = crate::host::host()
+            .expect("the Windows CI test environment must provide D3D12 WARP");
+        assert!(super::make_for(&host.device).is_ok());
+    }
+
+    #[test]
+    fn clamp_limits_its_work_to_execute_indirect_count() {
+        assert!(super::SOURCE.contains("active = min(active, count_buf.Load(count_offset))"));
+        assert!(super::SOURCE.contains("if (id.x >= active) return"));
+        assert!(super::SOURCE.contains("ByteAddressBuffer args : register(t0)"));
+        assert!(super::SOURCE.contains("RWByteAddressBuffer dst_args : register(u0)"));
+        assert!(super::SOURCE.contains("uint args_offset;"));
+        assert!(super::SOURCE.contains("src_at = args_offset + id.x * stride"));
+        assert!(super::SOURCE.contains("dst_at = id.x * stride"));
+        assert!(super::SOURCE.contains("count_buf.Load(count_offset)"));
+        assert!(
+            !super::SOURCE
+                .lines()
+                .any(|line| line.trim_start().starts_with("args.Store"))
+        );
+        assert!(super::SOURCE.contains("dst_args.Store"));
+    }
+
+    #[test]
+    fn clamp_without_count_keeps_the_maximum_record_count() {
+        // has_count == 0 leaves the active range equal to `records`.
+        assert!(super::SOURCE.contains("uint active = records"));
+    }
+
+    #[test]
+    fn indirect_layout_rejects_short_or_unaligned_records() {
+        assert_eq!(super::min_stride(0), Some(16));
+        assert_eq!(super::min_stride(1), Some(20));
+        assert_eq!(super::min_stride(2), Some(12));
+        assert_eq!(super::min_stride(10), Some(12));
+        assert_eq!(super::min_stride(99), None);
+        assert_eq!(super::validate_layout((0, 12, 2), 0x1000, None), None);
+        assert_eq!(super::validate_layout((0, 16, 2), 0x1004, None), None);
+        assert_eq!(super::validate_layout((0, 16, 2), 0x1000, Some(0x2004)), None);
+        assert_eq!(super::root_offset(0x4000, 0x1000, 0x4024, 16), Some(0x24));
+        assert_eq!(super::root_offset(0x4000, 0x1000, 0x4FFF, 2), None);
+        assert_eq!(super::root_offset(0x4000, 0x1000, 0x3FFF, 4), None);
+    }
+
+    #[test]
+    fn indirect_layout_checks_scratch_size() {
+        assert_eq!(super::validate_layout((0, 16, 4), 0x1000, None), Some(64));
+        assert_eq!(super::validate_layout((2, 12, 0), 0x1000, None), Some(0));
+        assert_eq!(
+            super::validate_layout((0, 16, 65_535 * 64), 0x1000, None),
+            Some(16u64 * 65_535 * 64),
+        );
+        assert_eq!(
+            super::validate_layout((0, 16, 65_535 * 64 + 1), 0x1000, None),
+            None,
+        );
+    }
+
+    #[test]
+    fn count_limits_clamp_writes_on_host() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
+
+        let host = crate::host::host()
+            .expect("the Windows CI test environment must provide D3D12 WARP");
+        let bytes = 3 * 16u64;
+        const INPUT_OFFSET: usize = 4;
+        const SENTINEL: u32 = 0xDEAD_BEEF;
+        let source_words = [
+            0x11u32, 0x2, 0x3, 0x4,
+            0x20, 0x30, 0x40, 0x50,
+            0x60, 0x70, 0x80, 0x90,
+        ];
+        let (source, source_data) = host.shared_buffer(bytes + INPUT_OFFSET as u64).unwrap();
+        let (count, count_data) = host.shared_buffer(256).unwrap();
+        // SAFETY: these are the mapped pointers returned by shared_buffer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                source_words.as_ptr(),
+                source_data.add(INPUT_OFFSET).cast(),
+                source_words.len(),
+            );
+            count_data.add(INPUT_OFFSET).cast::<u32>().write(1);
         }
-        assert!(super::clamp().is_some());
+        let (upload, upload_data) = host.upload_buffer(bytes).unwrap();
+        // SAFETY: upload_data is the mapped upload buffer returned above.
+        unsafe {
+            std::slice::from_raw_parts_mut(upload_data.cast::<u32>(), source_words.len())
+                .fill(SENTINEL);
+        }
+        let readback_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: bytes,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            ..Default::default()
+        };
+        let readback_heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_READBACK,
+            ..Default::default()
+        };
+        let mut readback: Option<ID3D12Resource> = None;
+        // SAFETY: plain creation of a readback buffer on the host device.
+        unsafe {
+            host.device
+                .CreateCommittedResource(
+                    &readback_heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &readback_desc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                    &mut readback,
+                )
+                .unwrap();
+        }
+        let readback = readback.unwrap();
+        let list = host.new_list().unwrap();
+        list.keep(&readback);
+
+        // Inputs are read by the helper as ByteAddressBuffer SRVs.
+        // SAFETY: all resources are live D3D12 buffers.
+        let source_gpu = unsafe { source.GetGPUVirtualAddress() };
+        // SAFETY: the count buffer is live.
+        let count_gpu = unsafe { count.GetGPUVirtualAddress() };
+        let source_to_read = crate::host::transition(
+            &source,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        );
+        let count_to_read = crate::host::transition(
+            &count,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        );
+        // These two helpers also record their production state transitions:
+        // the budget is cleared before each submission; scratch is reused.
+        let budget_gpu = list.budget().unwrap();
+        let dst = list.indirect_scratch(bytes).unwrap();
+        // SAFETY: the command list is open and all resources are alive.
+        unsafe {
+            list.list.ResourceBarrier(&[source_to_read, count_to_read]);
+            list.list.ResourceBarrier(&[crate::host::transition(
+                &dst,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+            )]);
+            list.list.CopyBufferRegion(&dst, 0, &upload, 0, bytes);
+            list.list.ResourceBarrier(&[crate::host::transition(
+                &dst,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            )]);
+        }
+
+        let clamp = super::make_for(&host.device).unwrap();
+        assert!(super::record_clamp(
+            &clamp,
+            &list.list,
+            &dst,
+            budget_gpu,
+            super::Inputs {
+                args: source_gpu,
+                args_offset: INPUT_OFFSET as u32,
+                count: Some(count_gpu),
+                count_offset: INPUT_OFFSET as u32,
+            },
+            (0, 16, 3),
+        ));
+        list.indirect_ready();
+
+        // Read back the output after the helper writes; restore the tracked
+        // indirect state so HostList::close can return the scratch to COMMON.
+        // SAFETY: ordered transitions and copies in one open command list.
+        unsafe {
+            list.list.ResourceBarrier(&[crate::host::transition(
+                &dst,
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+            )]);
+            list.list.CopyBufferRegion(&readback, 0, &dst, 0, bytes);
+            list.list.ResourceBarrier(&[crate::host::transition(
+                &dst,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            )]);
+            list.list.ResourceBarrier(&[
+                crate::host::transition(
+                    &source,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COMMON,
+                ),
+                crate::host::transition(
+                    &count,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COMMON,
+                ),
+            ]);
+        }
+        list.close();
+        host.execute(&[&list]);
+        // The same closed list can be submitted again: its explicit scratch
+        // and budget transitions must start and end in COMMON on each run.
+        host.execute(&[&list]);
+
+        let mut mapped = std::ptr::null_mut();
+        let range = D3D12_RANGE { Begin: 0, End: bytes as usize };
+        // SAFETY: execution completed before mapping the readback resource.
+        unsafe {
+            readback.Map(0, Some(&range), Some(&mut mapped)).unwrap();
+            let result = std::slice::from_raw_parts(mapped.cast::<u32>(), source_words.len());
+            assert_eq!(&result[..4], &[0x11, 0x2, 0x3, 0x4]);
+            assert_eq!(&result[4..], &[SENTINEL; 8]);
+            readback.Unmap(0, None);
+            let original = std::slice::from_raw_parts(
+                source_data.add(INPUT_OFFSET).cast::<u32>(),
+                source_words.len(),
+            );
+            assert_eq!(original, &source_words, "the clamp must not modify the title's input buffer");
+            assert_eq!(count_data.add(INPUT_OFFSET).cast::<u32>().read(), 1);
+        }
     }
 }

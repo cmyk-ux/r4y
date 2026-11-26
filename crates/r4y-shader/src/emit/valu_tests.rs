@@ -140,6 +140,8 @@ fn try_build_valu_cs(body: &[u32]) -> Result<HostShader, crate::ShaderError> {
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        target: super::Target::ANY,
+        console_cf: false,
     })?;
 
     let shader = HostShader {
@@ -184,11 +186,17 @@ fn run_cases(
 ) {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut ran = 0;
+    let mut available = 0;
     for (label, warp) in [("hardware", false), ("warp", true)] {
         let Ok(host) = Host::new(warp) else {
             eprintln!("no SM 6.6 {label} device; skipped");
             continue;
         };
+        available += 1;
+        if let Some(reason) = host.shader_wave_limit(&shader.dxil) {
+            eprintln!("{label}: {reason}; hardware probe skipped");
+            continue;
+        }
         let (root, pso) = host
             .compute_pipeline(shader)
             .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
@@ -216,6 +224,10 @@ fn run_cases(
             check(label, i, inputs, out[0][0]);
         }
         ran += 1;
+    }
+    if available > 0 && ran == 0 {
+        eprintln!("all SM 6.6 adapters skipped this probe because its fixed WaveSize is unsupported");
+        return;
     }
     assert!(ran > 0, "neither hardware nor WARP SM 6.6 device available");
 }
@@ -933,6 +945,8 @@ fn lower_cs32(words: &[u32], used: &[(u8, ResourceType, u32, u8)], validate: boo
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        target: super::Target::ANY,
+        console_cf: false,
     })
     .expect("lower");
     let shader = HostShader {

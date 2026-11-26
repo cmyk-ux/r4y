@@ -15,6 +15,17 @@ use crate::dxbc::{Container, FourCC};
 
 pub struct Host {
     pub device: ID3D12Device,
+    /// Wave-size range reported by D3D12 OPTIONS1; absent when not supported.
+    pub wave_target: Option<super::Target>,
+}
+
+/// The fixed WaveSize declared by a DXIL shader, if it has one.
+pub fn wave_size(dxil: &[u8]) -> Option<u32> {
+    let container = Container::parse(dxil).ok()?;
+    let psv = container.part(FourCC::PSV0)?.data;
+    let min = crate::dxbc::u32_at(psv, 4 + 16).ok()?;
+    let max = crate::dxbc::u32_at(psv, 4 + 20).ok()?;
+    (min == max).then_some(min)
 }
 
 /// What the stage declares that a pipeline must match.
@@ -63,6 +74,29 @@ fn err(e: windows::core::Error) -> String {
 }
 
 impl Host {
+    /// Whether this adapter can create the DXIL shader's fixed WaveSize.
+    /// Shaders without a fixed WaveSize do not require WaveOps.
+    pub fn supports_shader(&self, dxil: &[u8]) -> bool {
+        wave_size(dxil).is_none_or(|wave| {
+            self.wave_target.is_some_and(|target| target.runs(wave))
+        })
+    }
+
+    /// Human-readable capability reason for a shader the adapter cannot run.
+    pub fn shader_wave_limit(&self, dxil: &[u8]) -> Option<String> {
+        let wave = wave_size(dxil)?;
+        match self.wave_target {
+            Some(target) if target.runs(wave) => None,
+            Some(target) => Some(format!(
+                "shader requires WaveSize({wave}), adapter supports {}..={}",
+                target.lanes_min, target.lanes_max
+            )),
+            None => Some(format!(
+                "shader requires WaveSize({wave}), adapter did not report D3D12 wave capabilities"
+            )),
+        }
+    }
+
     /// The default adapter, or WARP with `warp` (or `R4Y_WARP=1`).
     pub fn new(warp: bool) -> Result<Self, String> {
         let warp = warp || std::env::var("R4Y_WARP").is_ok_and(|v| v == "1");
@@ -94,7 +128,29 @@ impl Host {
                     sm.HighestShaderModel.0
                 ));
             }
-            Ok(Host { device })
+            let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+            let wave_target = if device
+                .CheckFeatureSupport(
+                    D3D12_FEATURE_D3D12_OPTIONS1,
+                    (&raw mut options).cast(),
+                    size_of_val(&options) as u32,
+                )
+                .is_ok()
+                && options.WaveOps.as_bool()
+                && options.WaveLaneCountMin > 0
+                && options.WaveLaneCountMin <= options.WaveLaneCountMax
+            {
+                Some(super::Target {
+                    lanes_min: options.WaveLaneCountMin,
+                    lanes_max: options.WaveLaneCountMax,
+                })
+            } else {
+                None
+            };
+            Ok(Host {
+                device,
+                wave_target,
+            })
         }
     }
 
@@ -691,6 +747,8 @@ fn fmad_probe() -> Result<HostShader, crate::ShaderError> {
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        target: super::Target::ANY,
+        console_cf: false,
     })?;
     Ok(HostShader {
         stage: HwStage::Cs,

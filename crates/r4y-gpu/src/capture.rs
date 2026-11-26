@@ -425,13 +425,13 @@ fn peek(when: &str) {
 
 /// In a listed frame: copies an indirect execution's records (`args`:
 /// buffer, offset; in the indirect-argument state) and its count (in the
-/// unordered-access state unless in the same buffer) to readback memory,
+/// exact read-state combination tracked for ExecuteIndirect) to readback memory,
 /// logged once the list has run: how many records ask for work, and the
 /// first ones.
 pub(crate) fn read_indirect(
     list: &crate::host::HostList,
     args: (&ID3D12Resource, u64),
-    count: Option<(&ID3D12Resource, u64)>,
+    count: Option<(&ID3D12Resource, u64, u32)>,
     (kind, stride, max): (u32, u32, u32),
     name: String,
 ) {
@@ -471,9 +471,9 @@ pub(crate) fn read_indirect(
         let Some(buffer) = buffer else { return };
         l.ResourceBarrier(&[transition(args.0, arg_state, copy)]);
         l.CopyBufferRegion(&buffer, 0, args.0, args.1, len);
-        if let Some((c, at)) = count {
+        if let Some((c, at, state)) = count {
             let same = c.as_raw() == args.0.as_raw();
-            let state = if same { copy } else { D3D12_RESOURCE_STATE_UNORDERED_ACCESS };
+            let state = D3D12_RESOURCE_STATES(state as i32);
             if !same {
                 l.ResourceBarrier(&[transition(c, state, copy)]);
             }

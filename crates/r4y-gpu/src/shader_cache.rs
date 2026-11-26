@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use r4y_pipeline::{Cache, Converter};
-use r4y_shader::emit::{HostShader, StaticSampler, UserData};
+use r4y_shader::emit::{HostShader, StaticSampler, Target, UserData};
 use r4y_shader::{HwStage, RootType};
 
 static CACHE: OnceLock<Cache> = OnceLock::new();
@@ -55,7 +55,8 @@ pub fn counts() -> (u64, u64) {
 /// What a translation depends on besides its container: the translator
 /// (`r4y_shader::SOURCE_HASH`: its sources, manifest, the lock file and
 /// the compiler), the entry's encoding (this file's text) and the
-/// translation settings (loop limit, heap layout and group-barrier mode).
+/// translation settings (loop limit, heap layout, group-barrier mode and
+/// Wave64 cross-half fallback).
 fn build() -> &'static [u8; 32] {
     static BUILD: OnceLock<[u8; 32]> = OnceLock::new();
     BUILD.get_or_init(|| {
@@ -73,13 +74,23 @@ fn build() -> &'static [u8; 32] {
                 "R4Y_GROUP_SYNC: using experimental group-barrier behavior"
             );
         }
-        key(
+        let wave64_console_flow = r4y_shader::emit::wave64_console_flow();
+        if !wave64_console_flow {
+            tracing::warn!(
+                "R4Y_WAVE64_CONSOLE_FLOW=0: shaders requiring cross-half Wave64 exchange will be refused"
+            );
+        }
+        key_for_target(
             r4y_shader::SOURCE_HASH,
             ENCODING,
-            limit,
-            r4y_shader::emit::heap_views(),
-            r4y_shader::emit::title_views(),
-            group_sync,
+            KeySettings {
+                limit,
+                views: r4y_shader::emit::heap_views(),
+                title: r4y_shader::emit::title_views(),
+                group_sync,
+                wave64_console_flow,
+                target: crate::host::host().map_or(Target::NONE, |host| host.wave_target),
+            },
         )
     })
 }
@@ -87,14 +98,43 @@ fn build() -> &'static [u8; 32] {
 /// This file, whose `encode` and `decode` define the entries.
 const ENCODING: &[u8] = include_bytes!("shader_cache.rs");
 
+#[derive(Clone, Copy)]
+struct KeySettings {
+    limit: u32,
+    views: u32,
+    title: u32,
+    group_sync: u8,
+    wave64_console_flow: bool,
+    target: Target,
+}
+
+#[cfg(test)]
 fn key(translator: &str, encoding: &[u8], limit: u32, views: u32, title: u32, group_sync: u8) -> [u8; 32] {
+    key_for_target(
+        translator,
+        encoding,
+        KeySettings {
+            limit,
+            views,
+            title,
+            group_sync,
+            wave64_console_flow: true,
+            target: Target::ANY,
+        },
+    )
+}
+
+/// Host wave capabilities are part of the cache identity: one translation
+/// may use native wave64, while another adapter needs a split-wave form.
+fn key_for_target(translator: &str, encoding: &[u8], settings: KeySettings) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(translator.as_bytes());
     h.update(blake3::hash(encoding).as_bytes());
-    h.update(&limit.to_le_bytes());
-    h.update(&views.to_le_bytes());
-    h.update(&title.to_le_bytes());
-    h.update(&[group_sync]);
+    h.update(&settings.limit.to_le_bytes());
+    h.update(&settings.views.to_le_bytes());
+    h.update(&settings.title.to_le_bytes());
+    h.update(&[settings.group_sync, u8::from(settings.wave64_console_flow)]);
+    h.update(&settings.target.key());
     *h.finalize().as_bytes()
 }
 
@@ -102,8 +142,10 @@ fn key(translator: &str, encoding: &[u8], limit: u32, views: u32, title: u32, gr
 /// there is one, and whether it came from there.
 pub fn host_shader(container: &[u8]) -> (Result<HostShader, String>, bool) {
     // Also covers callers that translate without first opening a cache.
-    let _ = crate::host::host();
-    let translate = |c: &[u8]| r4y_shader::emit::translate(c).map_err(|e| e.to_string());
+    let target = crate::host::host().map_or(Target::NONE, |host| host.wave_target);
+    let translate = |c: &[u8]| {
+        r4y_shader::emit::translate_for(c, target).map_err(|e| e.to_string())
+    };
     match CACHE.get() {
         Some(cache) => cached(cache, build(), container, translate),
         None => (translate(container), false),
@@ -466,15 +508,41 @@ mod tests {
             k,
             key("0123456789abcdef", b"encoding", 1 << 20, r4y_shader::emit::HEAP_VIEWS_PORTABLE, 721_468, group_sync)
         );
+        let nvidia = Target { lanes_min: 32, lanes_max: 32 };
+        let rdna = Target { lanes_min: 32, lanes_max: 64 };
+        let settings = |target, wave64_console_flow| KeySettings {
+            limit: 1 << 20,
+            views,
+            title: views,
+            group_sync,
+            wave64_console_flow,
+            target,
+        };
+        let by_target = |target| {
+            key_for_target("0123456789abcdef", b"encoding", settings(target, true))
+        };
+        assert_ne!(by_target(nvidia), by_target(rdna));
+        assert_ne!(
+            k,
+            key_for_target(
+                "0123456789abcdef",
+                b"encoding",
+                settings(Target::ANY, false),
+            )
+        );
         assert_eq!(
             *build(),
-            key(
+            key_for_target(
                 r4y_shader::SOURCE_HASH,
                 ENCODING,
-                r4y_shader::emit::loop_limit(),
-                r4y_shader::emit::heap_views(),
-                r4y_shader::emit::title_views(),
-                r4y_shader::emit::group_sync(),
+                KeySettings {
+                    limit: r4y_shader::emit::loop_limit(),
+                    views: r4y_shader::emit::heap_views(),
+                    title: r4y_shader::emit::title_views(),
+                    group_sync: r4y_shader::emit::group_sync(),
+                    wave64_console_flow: r4y_shader::emit::wave64_console_flow(),
+                    target: crate::host::host().map_or(Target::NONE, |host| host.wave_target),
+                },
             )
         );
         // The encoding part is this file as built.

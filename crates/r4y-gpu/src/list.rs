@@ -868,11 +868,34 @@ extern "system" fn set_pipeline(this: This, pipeline: This) {
     let _ = this;
 }
 
-/// Pipeline syncs: waits for earlier work and cache flushes, at the top or
-/// bottom of the pipe `(flags, control, address, size)`. Host lists order
-/// their own work and every submission is waited for, so there is nothing
-/// to do.
-extern "system" fn sync(_: This, _flags: u32, _control: u32, _address: u64, _size: u64) {}
+/// Records a global UAV barrier: a pipeline sync orders shader writes
+/// across dispatches and draws within this host command list. Waiting for a
+/// submission only orders work after the entire list has finished.
+fn wait_for_shader_writes(this: This) {
+    #[cfg(windows)]
+    if let Some(list) = host_list(this) {
+        use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_BARRIER;
+        const _: () = assert!(
+            std::mem::size_of::<Barrier>() == std::mem::size_of::<D3D12_RESOURCE_BARRIER>()
+        );
+        // SAFETY: Barrier has the same repr(C) layout as D3D12_RESOURCE_BARRIER;
+        // UAV_BARRIER is a global (null-resource) barrier.
+        let barrier =
+            unsafe { std::mem::transmute::<Barrier, D3D12_RESOURCE_BARRIER>(UAV_BARRIER) };
+        // SAFETY: the title's host command list is open while it records calls.
+        unsafe { list.list.ResourceBarrier(&[barrier]) };
+    }
+    #[cfg(not(windows))]
+    let _ = this;
+}
+
+/// Pipeline syncs wait for earlier shader writes, including writes earlier
+/// in this same command list. The title supplies flags/control/address/size
+/// for finer console cache semantics; a global UAV barrier is the safe D3D12
+/// ordering primitive for the resources R4Y currently mirrors.
+extern "system" fn sync(this: This, _flags: u32, _control: u32, _address: u64, _size: u64) {
+    wait_for_shader_writes(this);
+}
 
 /// Reset with console flags `(allocator, pipeline, flags)`; the flags only
 /// tune the console's command memory.
@@ -1529,6 +1552,14 @@ mod tests {
 
     /// ClearUnorderedAccessViewUint/Float and DiscardResource come before
     /// the methods newer lists insert: the AMD upscaler calls them there.
+    #[test]
+    fn global_uav_barrier_has_no_resource_and_no_transition_payload() {
+        assert_eq!(UAV_BARRIER.kind, 2);
+        assert!(UAV_BARRIER.first.is_null());
+        assert_eq!(UAV_BARRIER.second, 0);
+        assert_eq!(UAV_BARRIER.last, 0);
+    }
+
     #[test]
     fn unordered_access_clears_have_the_same_slots_in_both_layouts() {
         for table in [&LIST_FUNCTIONS, &NEWER_LIST_FUNCTIONS] {

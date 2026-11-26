@@ -243,6 +243,10 @@ fn wait(p: &Pending, frame: u64) {
 static QUEUES: (Mutex<[VecDeque<Arc<Pending>>; 2]>, Condvar) =
     (Mutex::new([VecDeque::new(), VecDeque::new()]), Condvar::new());
 
+/// NVIDIA's D3D12 pipeline compiler can recurse well beyond Rust's default
+/// 2 MiB worker stack. Reserve room for the driver; pages are committed as used.
+const PIPELINE_STACK: usize = 64 << 20;
+
 /// Hands `p` to the workers (half the logical processors, 2 to 8), started
 /// on first use.
 fn queue(p: Arc<Pending>, now: bool) {
@@ -253,6 +257,7 @@ fn queue(p: Arc<Pending>, now: bool) {
             .filter(|i| {
                 let spawned = std::thread::Builder::new()
                     .name(format!("r4y-pipelines-{i}"))
+                    .stack_size(PIPELINE_STACK)
                     .spawn(work);
                 if let Err(e) = &spawned {
                     tracing::warn!(error = %e, "no pipeline worker");

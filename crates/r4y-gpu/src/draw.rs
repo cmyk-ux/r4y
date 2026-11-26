@@ -1666,11 +1666,18 @@ impl State {
         if let Some((s, at)) = &counter {
             s.refresh(list, *at, 4);
         }
-        // Bounded first: the clamp binds a compute pipeline of its own.
-        if !crate::indirect::bound(list, &args, args.gpu(arguments), (kind, stride, max)) {
-            why("not bounded (no clamp, or arguments not 4-byte aligned)");
+        // Clamp into the list's device-local scratch buffer. The title's
+        // argument shadow is an SRV input and remains unchanged.
+        let Some(bounded) = crate::indirect::bound(
+            list,
+            &args,
+            args.gpu(arguments),
+            counter.as_ref().map(|(shadow, address)| (shadow, *address)),
+            (kind, stride, max),
+        ) else {
+            why("not bounded (no clamp, invalid layout, or unaligned arguments/count)");
             return false;
-        }
+        };
         self.host_pipeline = 0;
         self.host_roots[1] = 0;
         let ran = match kind {
@@ -1688,7 +1695,6 @@ impl State {
             _ => false,
         };
         if !ran {
-            crate::indirect::done(list, &args);
             #[cfg(feature = "diagnostics")]
             match crate::pipeline::host_pipeline(self.pipeline as This) {
                 None => {
@@ -1708,20 +1714,20 @@ impl State {
         list.note_op(|| {
             self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}"), kind == DISPATCH)
         });
-        // Arguments and the optional count are read in INDIRECT_ARGUMENT
-        // state, after the clamp or any preceding shader access.
-        list.buffer_state(&args, BUFFER_INDIRECT);
-        if let Some((counter_shadow, _)) = &counter {
-            list.buffer_state(counter_shadow, BUFFER_INDIRECT);
-        }
+        // The helper output and optional count are consumed as indirect
+        // arguments. The original argument shadow remains a shader-resource
+        // input and is never rewritten by the clamp.
+        let _count_state = counter.as_ref().map(|(counter_shadow, _)| {
+            list.buffer_state(counter_shadow, BUFFER_INDIRECT)
+        });
         // SAFETY: an open list with everything set; the buffers are host
         // copies the list keeps alive (refresh), the signature is cached.
         unsafe {
             list.list.ExecuteIndirect(
                 &signature,
                 max,
-                &args.buffer,
-                args.offset(arguments),
+                &bounded,
+                0,
                 counter.as_ref().map(|(s, _)| &s.buffer),
                 counter.as_ref().map_or(0, |(s, at)| s.offset(*at)),
             )
@@ -1729,11 +1735,13 @@ impl State {
         // A listed frame: what the records held (after the clamp).
         #[cfg(feature = "diagnostics")]
         if crate::capture::dump_on() {
-            let count = counter.as_ref().map(|(s, at)| (&s.buffer, s.offset(*at)));
+            let count = counter
+                .as_ref()
+                .zip(_count_state)
+                .map(|((s, at), state)| (&s.buffer, s.offset(*at), state));
             let name = crate::pipeline::shaders_of(pipeline);
-            crate::capture::read_indirect(list, (&args.buffer, args.offset(arguments)), count, (kind, stride, max), name);
+            crate::capture::read_indirect(list, (&bounded, 0), count, (kind, stride, max), name);
         }
-        crate::indirect::done(list, &args);
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
         } else {
